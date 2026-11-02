@@ -11,6 +11,7 @@ import { SettingsModule } from '../settings/settings.module';
 import { AdminSupportTicketsController } from './controllers/admin-support-tickets.controller';
 import { InternalGuestSupportController } from './controllers/internal-guest-support.controller';
 import { PublicAttachmentController } from './controllers/public-attachment.controller';
+import { InternalBotSupportController } from './controllers/internal-bot-support.controller';
 import { InternalUserSupportController } from './controllers/internal-user-support.controller';
 import { SupportAiDispatchService } from './services/support-ai-dispatch.service';
 import { SupportNotificationsService } from './services/support-notifications.service';
@@ -51,6 +52,7 @@ import { SUPPORT_AI_QUEUE } from './support-ai.constants';
     InternalUserSupportController,
     InternalGuestSupportController,
     PublicAttachmentController,
+    InternalBotSupportController,
   ],
   providers: [
     SupportTicketsService,
