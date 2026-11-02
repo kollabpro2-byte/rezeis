@@ -2,7 +2,7 @@ import { Controller, Get, Param, Query, Res, HttpException, HttpStatus } from '@
 import { Response } from 'express';
 import { SupportAttachmentService } from '../services/support-attachment.service';
 
-@Controller('api/v1/support/public-attachments')
+@Controller('v1/support/public-attachments')
 export class PublicAttachmentController {
   constructor(private readonly attachments: SupportAttachmentService) {}
 
