@@ -191,6 +191,19 @@ function isGuest(ticket: Pick<Ticket, 'channel'>): boolean {
   return ticket.channel === 'guest';
 }
 
+
+function linkify(text: string) {
+  const re = /(https?:\/\/[^\s]+)/g
+  const parts = text.split(re)
+  return parts.map((part, i) =>
+    /^https?:\/\//.test(part) ? (
+      <a key={i} href={part} target="_blank" rel="noopener noreferrer" className="underline break-all">{part}</a>
+    ) : (
+      <span key={i}>{part}</span>
+    ),
+  )
+}
+
 export default function SupportTicketsPage() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
@@ -971,7 +984,7 @@ function MessageBubble({
             <FileText className="h-3 w-3" />
             {t('supportTicketsPage.docRequest.badge')}
           </p>
-          <p className="text-sm mt-1 whitespace-pre-wrap">{message.content}</p>
+          <p className="text-sm mt-1 whitespace-pre-wrap">{linkify(message.content)}</p>
         </div>
       </div>
     );
@@ -991,7 +1004,25 @@ function MessageBubble({
             {t('supportTicketsPage.detail.ai.author')}
           </p>
         )}
-        {message.content && <p className="text-sm whitespace-pre-wrap">{message.content}</p>}
+        {message.content && <p className="text-sm whitespace-pre-wrap">{linkify(message.content)}</p>}
+        {message.content && (
+          <button
+            type="button"
+            className={cn('mt-1 text-[10px] underline opacity-70', isAdmin ? 'text-primary-foreground' : '')}
+            onClick={async () => {
+              const next = window.prompt('Изменить сообщение', message.content)
+              if (!next || !next.trim() || next.trim() === message.content) return
+              try {
+                await api.patch(`/admin/support-tickets/${ticketId}/messages/${message.id}`, { content: next.trim() })
+                window.location.reload()
+              } catch {
+                window.alert('Не удалось изменить')
+              }
+            }}
+          >
+            Изменить
+          </button>
+        )}
         {message.attachments && message.attachments.length > 0 && (
           <div className="mt-2 space-y-1">
             {message.attachments.map((att) => {

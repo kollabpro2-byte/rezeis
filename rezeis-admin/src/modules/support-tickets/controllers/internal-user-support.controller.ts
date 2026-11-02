@@ -11,6 +11,7 @@ import {
   NotFoundException,
   Optional,
   Param,
+  Patch,
   Post,
   StreamableFile,
   UseGuards,
@@ -110,6 +111,26 @@ export class InternalUserSupportController {
       // swallow — read view must still render even if the mark-read fails
     }
     return serializeTicket(ticket);
+  }
+
+
+  @Patch(':userRef/tickets/:ticketId/messages/:messageId')
+  @ApiOperation({ summary: 'Edit the user\'s own message' })
+  public async editMessage(
+    @Param('userRef') userRef: string,
+    @Param('ticketId') ticketId: string,
+    @Param('messageId') messageId: string,
+    @Body() body: { content?: string },
+  ) {
+    const userId = await this.resolveUserId(userRef);
+    const ticket = await this.supportTicketsService.getById(ticketId);
+    if (ticket.userId !== userId) throw new ForbiddenException('Not your ticket');
+    const content = (body.content ?? '').trim();
+    if (!content) throw new BadRequestException('Content required');
+    await this.supportTicketsService.updateMessageContent({
+      ticketId, messageId, content, authorType: 'USER',
+    });
+    return serializeTicket(await this.supportTicketsService.getById(ticketId));
   }
 
   @Get(':userRef/tickets/:ticketId/attachments/:attachmentId')

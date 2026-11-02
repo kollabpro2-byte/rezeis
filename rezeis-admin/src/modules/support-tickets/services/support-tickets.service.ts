@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, SupportTicketStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
@@ -466,6 +466,31 @@ export class SupportTicketsService {
         closedAt: new Date(),
         archivedAt: new Date(),
         closedBy: input.closedBy,
+      },
+    });
+  }
+
+
+  /** Update text of an existing message. Caller must authorize. */
+  public async updateMessageContent(input: {
+    ticketId: string;
+    messageId: string;
+    content: string;
+    authorType?: 'USER' | 'ADMIN';
+  }) {
+    const message = await this.prismaService.supportTicketMessage.findFirst({
+      where: { id: input.messageId, ticketId: input.ticketId },
+    });
+    if (!message) throw new NotFoundException('Message not found');
+    if (input.authorType && message.authorType !== input.authorType) {
+      throw new ForbiddenException('Cannot edit this message');
+    }
+    const meta = (message.metadata && typeof message.metadata === 'object') ? message.metadata as Record<string, unknown> : {};
+    return this.prismaService.supportTicketMessage.update({
+      where: { id: input.messageId },
+      data: {
+        content: input.content,
+        metadata: { ...meta, editedAt: new Date().toISOString() },
       },
     });
   }

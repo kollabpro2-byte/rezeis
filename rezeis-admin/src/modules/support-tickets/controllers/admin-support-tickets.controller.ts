@@ -14,6 +14,7 @@ import {
   Optional,
   Param,
   ParseIntPipe,
+  Patch,
   Post,
   Query,
   Req,
@@ -301,6 +302,25 @@ export class AdminSupportTicketsController {
     }
     await this.supportAi.setActive(ticketId, body.active);
     await this.audit(admin, req, body.active ? 'support_ticket.ai_on' : 'support_ticket.ai_off', { ticketId });
+    return serializeTicket(await this.supportTicketsService.getById(ticketId));
+  }
+
+
+  @Patch(':ticketId/messages/:messageId')
+  @RequirePermission('support_tickets', 'edit')
+  @ApiOperation({ summary: 'Edit an existing message text' })
+  public async editMessage(
+    @Param('ticketId') ticketId: string,
+    @Param('messageId') messageId: string,
+    @Body() body: { content?: string },
+    @CurrentAdmin() admin: CurrentAdminInterface,
+    @Req() req: Request,
+  ) {
+    const content = typeof body?.content === 'string' ? body.content.trim() : '';
+    if (!content) throw new BadRequestException('Content required');
+    if (content.length > 10_000) throw new BadRequestException('Too long');
+    await this.supportTicketsService.updateMessageContent({ ticketId, messageId, content });
+    await this.audit(admin, req, 'support_ticket.message_edit', { ticketId, messageId });
     return serializeTicket(await this.supportTicketsService.getById(ticketId));
   }
 
