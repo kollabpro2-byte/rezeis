@@ -1,8 +1,9 @@
-import { Body, Controller, Param, Post, UseGuards, HttpCode, HttpStatus, BadRequestException } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, UseGuards, HttpCode, HttpStatus, BadRequestException } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
 import { SupportTicketsService } from '../services/support-tickets.service';
 import { SupportAttachmentService } from '../services/support-attachment.service';
+import { PrismaService } from '../../../common/prisma/prisma.service';
 
 /**
  * Internal endpoint for the support AI bridge (Grok bot).
@@ -15,7 +16,31 @@ export class InternalBotSupportController {
   constructor(
     private readonly tickets: SupportTicketsService,
     private readonly attachments: SupportAttachmentService,
+    private readonly prisma: PrismaService,
   ) {}
+
+
+  @Get('open')
+  async listOpen() {
+    const tickets = await this.prisma.supportTicket.findMany({
+      where: { status: { in: ['OPEN', 'WAITING_REPLY'] } },
+      orderBy: { updatedAt: 'desc' },
+      take: 50,
+      select: {
+        id: true,
+        subject: true,
+        status: true,
+        updatedAt: true,
+        messages: {
+          orderBy: { createdAt: 'asc' },
+          take: 30,
+          select: { authorType: true, content: true, createdAt: true },
+        },
+      },
+    });
+    return { ok: true, count: tickets.length, tickets };
+  }
+
 
   @Post(':ticketId/reply')
   @HttpCode(HttpStatus.CREATED)
