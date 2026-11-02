@@ -56,4 +56,13 @@ export class InternalBotSupportController {
     });
     return { ok: true };
   }
+
+  @Post(':ticketId/close')
+  @HttpCode(HttpStatus.OK)
+  async close(@Param('ticketId') ticketId: string) {
+    await this.tickets.getById(ticketId);
+    await this.tickets.close({ ticketId, closedBy: "grok-bot" });
+    return { ok: true };
+  }
+
 }
