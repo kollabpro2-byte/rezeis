@@ -209,10 +209,6 @@ export class SupportAttachmentService {
 }
 
 /** Keep a path segment to safe characters (ticket ids are CUIDs already). */
-function sanitizeSegment(segment: string): string {
-  return segment.replace(/[^a-zA-Z0-9_-]/g, '');
-}
-
 
   /**
    * Stream an attachment by its id only (for the public secret-protected endpoint).
@@ -239,3 +235,7 @@ function sanitizeSegment(segment: string): string {
       sizeBytes: attachment.sizeBytes,
     };
   }
+
+function sanitizeSegment(segment: string): string {
+  return segment.replace(/[^a-zA-Z0-9_-]/g, '');
+}
