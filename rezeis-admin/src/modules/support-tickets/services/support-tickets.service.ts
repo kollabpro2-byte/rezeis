@@ -485,12 +485,13 @@ export class SupportTicketsService {
     if (input.authorType && message.authorType !== input.authorType) {
       throw new ForbiddenException('Cannot edit this message');
     }
-    const meta = (message.metadata && typeof message.metadata === 'object') ? message.metadata as Record<string, unknown> : {};
+    const raw = message.metadata;
+    const meta = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
     return this.prismaService.supportTicketMessage.update({
       where: { id: input.messageId },
       data: {
         content: input.content,
-        metadata: { ...meta, editedAt: new Date().toISOString() },
+        metadata: { ...meta, editedAt: new Date().toISOString() } as Prisma.InputJsonValue,
       },
     });
   }
