@@ -212,3 +212,30 @@ export class SupportAttachmentService {
 function sanitizeSegment(segment: string): string {
   return segment.replace(/[^a-zA-Z0-9_-]/g, '');
 }
+
+
+  /**
+   * Stream an attachment by its id only (for the public secret-protected endpoint).
+   * Caller must have already verified the shared secret.
+   */
+  public async streamById(attachmentId: string): Promise<AttachmentStream | null> {
+    const attachment = await this.prismaService.supportAttachment.findUnique({
+      where: { id: attachmentId },
+      select: { storedName: true, mimeType: true, filename: true, sizeBytes: true, message: { select: { ticketId: true } } },
+    });
+    if (!attachment || !attachment.storedName) return null;
+    const base = path.join(resolveAttachmentsDir(), sanitizeSegment(attachment.message.ticketId));
+    const filePath = path.resolve(base, attachment.storedName);
+    if (!filePath.startsWith(base)) return null;
+    try {
+      await fs.access(filePath);
+    } catch {
+      return null;
+    }
+    return {
+      stream: createReadStream(filePath),
+      mimeType: attachment.mimeType,
+      filename: attachment.filename,
+      sizeBytes: attachment.sizeBytes,
+    };
+  }

@@ -151,7 +151,7 @@ export interface TicketTurn {
   readonly authorType: 'USER' | 'ADMIN' | 'SYSTEM';
   readonly content: string;
   readonly metadata: unknown;
-  readonly attachments: ReadonlyArray<{ readonly filename: string }>;
+  readonly attachments: ReadonlyArray<{ readonly id?: string; readonly filename: string }>;
 }
 
 /** The longest single message the model is shown. */
@@ -179,7 +179,16 @@ export function buildSupportAiConversation(
     if (turn.authorType === 'SYSTEM') continue;
     let text = turn.content.trim().slice(0, MAX_TURN_CHARS);
     if (turn.authorType === 'USER') {
-      const files = turn.attachments.map((a) => `[Клиент приложил файл: ${a.filename}]`);
+      const base = process.env.PUBLIC_BASE_URL || 'https://my.wingerapp.pro';
+      const token = process.env.SUPPORT_ATTACHMENT_PUBLIC_TOKEN || '';
+      const files = turn.attachments.map((a) => {
+        const url = token
+          ? `${base}/api/v1/support/public-attachments/${(a as any).id || ''}?token=${token}`
+          : '';
+        return url
+          ? `[Клиент приложил файл: ${a.filename}]\n${url}`
+          : `[Клиент приложил файл: ${a.filename}]`;
+      });
       text = [text, ...files].filter((line) => line.length > 0).join('\n');
       if (!subjectShown) {
         text = `Тема обращения: ${subject.trim()}\n\n${text}`;

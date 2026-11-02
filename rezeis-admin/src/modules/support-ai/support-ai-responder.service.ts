@@ -350,7 +350,7 @@ export class SupportAiResponderService {
             authorType: true,
             content: true,
             metadata: true,
-            attachments: { select: { filename: true } },
+            attachments: { select: { id: true, filename: true } },
           },
         },
       },
