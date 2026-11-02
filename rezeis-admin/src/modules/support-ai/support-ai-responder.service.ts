@@ -41,7 +41,7 @@ const HISTORY_MESSAGES = 30;
 const MAX_TOOL_ROUNDS = 4;
 
 /** One provider call; a stuck one fails the attempt instead of the worker. */
-const MODEL_TIMEOUT_MS = 45_000;
+const MODEL_TIMEOUT_MS = 180_000; // increased for Grok Bot webhook responses
 
 /** The model the old chat fell back to when the operator named none. */
 const DEFAULT_MODEL = 'gpt-4o-mini';
@@ -203,9 +203,39 @@ export class SupportAiResponderService {
    * moment and the next answer must use the new ones.
    */
   protected createClient(settings: AiConfigSettings): SupportAiModelClient {
+    const base = settings.baseUrl.trim();
+    // Webhook mode: if baseUrl contains "webhook" or model is "grok-bot"
+    if (base.includes('webhook') || settings.model === 'grok-bot') {
+      return {
+        chat: {
+          completions: {
+            create: async (params) => {
+              const resp = await fetch(base || 'http://localhost:8787/webhook/support', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  ...(settings.apiKey ? { Authorization: `Bearer ${settings.apiKey}` } : {}),
+                },
+                body: JSON.stringify({
+                  model: params.model,
+                  messages: params.messages,
+                  tools: params.tools,
+                  temperature: params.temperature,
+                  max_tokens: params.max_tokens,
+                }),
+                signal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
+              });
+              if (!resp.ok) throw new Error(`Webhook error ${resp.status}`);
+              const data = await resp.json();
+              return data as any;
+            },
+          },
+        },
+      } as SupportAiModelClient;
+    }
     return new OpenAI({
       apiKey: settings.apiKey,
-      ...(settings.baseUrl.trim().length > 0 ? { baseURL: settings.baseUrl.trim() } : {}),
+      ...(base.length > 0 ? { baseURL: base } : {}),
       timeout: MODEL_TIMEOUT_MS,
       maxRetries: 1,
     });
