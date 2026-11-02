@@ -164,7 +164,7 @@ export class SupportAiResponderService {
       },
       ...buildSupportAiConversation(ticket.subject, ticket.messages),
     ];
-    const result = await this.runModel(this.createClient(settings), model, messages);
+    const result = await this.runModel(this.createClient(settings, ticket.id), model, messages);
 
     // The model took seconds. An operator may have answered, switched the
     // assistant off, or the client written again in that time.
@@ -202,7 +202,7 @@ export class SupportAiResponderService {
    * per job because the operator can change the key or the address at any
    * moment and the next answer must use the new ones.
    */
-  protected createClient(settings: AiConfigSettings): SupportAiModelClient {
+  protected createClient(settings: AiConfigSettings, ticketId?: string): SupportAiModelClient {
     const base = settings.baseUrl.trim();
     // Webhook mode: if baseUrl contains "webhook" or model is "grok-bot"
     if (base.includes('webhook') || settings.model === 'grok-bot') {
@@ -222,6 +222,7 @@ export class SupportAiResponderService {
                   tools: params.tools,
                   temperature: params.temperature,
                   max_tokens: params.max_tokens,
+                  ticketId: ticketId || null,
                 }),
                 signal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
               });
