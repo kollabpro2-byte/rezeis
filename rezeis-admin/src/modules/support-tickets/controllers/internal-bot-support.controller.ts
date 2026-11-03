@@ -34,7 +34,7 @@ export class InternalBotSupportController {
         messages: {
           orderBy: { createdAt: 'asc' },
           take: 30,
-          select: { authorType: true, content: true, createdAt: true },
+          select: { id: true, authorType: true, content: true, createdAt: true, attachments: { select: { id: true, filename: true, mimeType: true } } },
         },
       },
     });
