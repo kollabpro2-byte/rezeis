@@ -4,8 +4,10 @@ import { PrismaService } from '../../common/prisma/prisma.service';
 import { AuthModule } from '../auth/auth.module';
 import { LegalDocumentsModule } from '../legal-documents/legal-documents.module';
 import { BotNotifierClient } from '../notifications/services/bot-notifier.client';
+import { ProfileSyncModule } from '../profile-sync/profile-sync.module';
 import { InternalPushModule } from '../push/internal-push.module';
 import { ReferralsModule } from '../referrals/referrals.module';
+import { RemnawaveModule } from '../remnawave/remnawave.module';
 import { SettingsModule } from '../settings/settings.module';
 import { InternalWebAuthCredentialsController } from './controllers/internal-web-auth-credentials.controller';
 import { InternalWebAuthController } from './controllers/internal-web-auth.controller';
@@ -16,6 +18,7 @@ import {
   PasswordResetService,
 } from './services/password-reset.service';
 import { RegistrationSnapshotService } from './services/registration-snapshot.service';
+import { AppTrialService } from './services/app-trial.service';
 import { WebAuthService } from './services/web-auth.service';
 import {
   asWebFirstPasswordDatabase,
@@ -53,10 +56,11 @@ import {
  * customer whose account has no password set the first one.
  */
 @Module({
-  imports: [AuthModule, LegalDocumentsModule, ReferralsModule, SettingsModule, InternalPushModule],
+  imports: [AuthModule, LegalDocumentsModule, ReferralsModule, SettingsModule, InternalPushModule, RemnawaveModule, ProfileSyncModule],
   controllers: [InternalWebAuthController, InternalWebAuthCredentialsController],
   providers: [
     WebAuthService,
+    AppTrialService,
     BotSigninTokenService,
     RegistrationSnapshotService,
     PasswordResetService,

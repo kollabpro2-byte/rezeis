@@ -3,7 +3,7 @@ import { Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 
-export type RegistrationChannel = 'web' | 'tma' | 'bot' | 'oauth';
+export type RegistrationChannel = 'web' | 'tma' | 'bot' | 'oauth' | 'app';
 
 export interface RegistrationUtmInput {
   readonly source?: string | null;

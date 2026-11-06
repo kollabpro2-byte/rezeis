@@ -3,6 +3,7 @@ import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 import { EmailModule } from '../email/email.module';
+import { ProfileSyncModule } from '../profile-sync/profile-sync.module';
 import { QuestsModule } from '../quests/quests.module';
 import { InternalLinkingController } from './controllers/internal-linking.controller';
 import { LinkingService } from './services/linking.service';
@@ -15,7 +16,7 @@ import { LinkingService } from './services/linking.service';
  * verified email) to an existing `reiwa_id`.
  */
 @Module({
-  imports: [AuthModule, EmailModule, QuestsModule],
+  imports: [AuthModule, EmailModule, QuestsModule, SubscriptionsModule, ProfileSyncModule],
   controllers: [InternalLinkingController],
   providers: [LinkingService],
   exports: [LinkingService],

@@ -3,11 +3,12 @@ import { createHash, randomBytes } from 'node:crypto';
 import { ConflictException, Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
-import { BlockedIdentityKind } from '@prisma/client';
+import { BlockedIdentityKind, Prisma, QuestCompletionStatus } from '@prisma/client';
 import { BlockedIdentityService } from '../../blocked-identities/services/blocked-identity.service';
 import { EmailService } from '../../email/services/email.service';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
 import { QuestProgressService } from '../../quests/services/quest-progress.service';
+import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { SubscriptionMutationsService } from '../../subscriptions/services/subscription-mutations.service';
 import { QuestType } from '@prisma/client';
 import {
@@ -82,6 +83,7 @@ export class LinkingService {
     @Optional() private readonly blockedIdentityService?: BlockedIdentityService,
     @Optional() private readonly questProgress?: QuestProgressService,
     @Optional() private readonly subscriptions?: SubscriptionMutationsService,
+    @Optional() private readonly profileSync?: ProfileSyncQueueService,
   ) {}
 
   // ── Telegram ─────────────────────────────────────────────────────────
@@ -120,7 +122,7 @@ export class LinkingService {
           // because we don't have a Telegram address yet — that's the
           // whole point of the flow. Lookup happens by `userId` plus
           // `purpose`, never by destination, so this stays consistent.
-          destination: `${input.userId}:${(input as any).source || 'web'}`,
+          destination: `${input.userId}:${input.source === 'app' ? 'app' : 'web'}`,
           codeHash,
           attemptsLeft: LinkingService.DEFAULT_ATTEMPTS_LEFT,
           expiresAt,
@@ -155,6 +157,7 @@ export class LinkingService {
     }
 
     let newlyLinkedUserId: string | null = null;
+    let grantAppDays = false;
     const result = await this.prismaService.$transaction(async (tx) => {
       // Find the latest non-consumed challenge for this code hash. Done
       // upfront so we can early-reject before touching any User rows.
@@ -214,6 +217,7 @@ export class LinkingService {
         data: { consumedAt: new Date() },
       });
       newlyLinkedUserId = webAccount.userId;
+      grantAppDays = (challenge.destination ?? '').endsWith(':app');
       return { success: true, userId: webAccount.userId };
     });
 
@@ -240,24 +244,39 @@ export class LinkingService {
           this.logger.warn({ err, userId: newlyLinkedUserId }, 'Failed to settle LINK_TELEGRAM quest on link');
         }
       }
-      // Grant +3 days if the link was initiated from the Android app
-      if (this.subscriptions) {
+      // +3 days when the link was started in the Android app. The mark is the
+      // challenge we just consumed (`userId:app`), not a later lookup.
+      if (grantAppDays && this.subscriptions && newlyLinkedUserId !== null) {
         try {
-          const challenge = await this.prismaService.authChallenge.findFirst({
-            where: { webAccountId: { not: undefined }, purpose: LinkingService.TELEGRAM_PURPOSE },
-            orderBy: { createdAt: 'desc' },
+          const active = await this.prismaService.subscription.findFirst({
+            where: { userId: newlyLinkedUserId, status: 'ACTIVE' },
+            orderBy: { expiresAt: 'desc' },
+            select: { id: true },
           });
-          // We stored source in destination as userId:source
-          const dest = challenge?.destination || '';
-          if (dest.endsWith(':app')) {
-            const active = await this.prismaService.subscription.findFirst({
-              where: { userId: newlyLinkedUserId, status: 'ACTIVE' },
+          const target =
+            active ??
+            (await this.prismaService.subscription.findFirst({
+              where: { userId: newlyLinkedUserId, status: { not: 'DELETED' } },
+              orderBy: { expiresAt: 'desc' },
               select: { id: true },
+            }));
+          if (target) {
+            await this.subscriptions.extend({ subscriptionId: target.id, additionalDays: 3 });
+            await this.profileSync?.enqueueSubscriptionSync(target.id, { source: 'APP_TELEGRAM_LINK' });
+            await this.prismaService.questCompletion.updateMany({
+              where: {
+                userId: newlyLinkedUserId,
+                status: QuestCompletionStatus.COMPLETED,
+                quest: { type: QuestType.LINK_TELEGRAM },
+              },
+              data: {
+                status: QuestCompletionStatus.CLAIMED,
+                claimedAt: new Date(),
+                rewardIssuedAt: new Date(),
+                rewardSnapshot: { type: 'DAYS', days: 3, source: 'app_telegram_link' } as Prisma.InputJsonValue,
+              },
             });
-            if (active) {
-              await this.subscriptions.extend({ subscriptionId: active.id, additionalDays: 3 });
-              this.logger.log(`Granted +3 days to subscription ${active.id} for app Telegram link`);
-            }
+            this.logger.log(`Granted +3 days to subscription ${target.id} for app Telegram link`);
           }
         } catch (err: unknown) {
           this.logger.warn({ err, userId: newlyLinkedUserId }, 'Failed to grant +3 days on app Telegram link');

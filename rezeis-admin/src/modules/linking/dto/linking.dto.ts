@@ -1,10 +1,15 @@
-import { IsEmail, IsString, Length, Matches } from 'class-validator';
+import { IsEmail, IsIn, IsOptional, IsString, Length, Matches } from 'class-validator';
 
 /** Body for `POST /api/internal/link/telegram/generate`. */
 export class LinkTelegramGenerateDto {
   @IsString()
   @Length(1, 64)
   public readonly userId!: string;
+
+  /** `app` when the Android client started the link. Days are granted from that mark. */
+  @IsOptional()
+  @IsIn(['app', 'web'])
+  public readonly source?: 'app' | 'web';
 }
 
 /**

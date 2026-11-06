@@ -42,6 +42,7 @@ import {
 import { canReceiveResetLink, hasVerifiedEmail, smtpCanDeliver } from '../utils/reset-channels.util';
 import { raiseSessionsRevokedAt } from '../utils/sessions-revoked-at.util';
 import { RegistrationSnapshotService } from './registration-snapshot.service';
+import { AppTrialService } from './app-trial.service';
 
 /**
  * WebAuthService
@@ -90,6 +91,7 @@ export class WebAuthService {
      */
     @Optional() private readonly blockedIdentityService?: BlockedIdentityService,
     @Optional() private readonly blockedIpService?: BlockedIpService,
+    @Optional() private readonly appTrial?: AppTrialService,
   ) {}
 
   public async register(input: WebAuthRegisterDto): Promise<WebAuthRegisterResultInterface> {
@@ -296,7 +298,7 @@ export class WebAuthService {
       await this.registrationSnapshotService.captureBestEffort({
         userId: result.userId,
         channel:
-          snap.channel === 'tma' || snap.channel === 'bot' || snap.channel === 'oauth'
+          snap.channel === 'tma' || snap.channel === 'bot' || snap.channel === 'oauth' || snap.channel === 'app'
             ? snap.channel
             : 'web',
         ip: snap.ip ?? null,
@@ -313,6 +315,10 @@ export class WebAuthService {
     // "invited-only" gating and partner chain rely on.
     if (input.referralCode) {
       await this.consumeReferralCode(result.userId, input.referralCode);
+    }
+
+    if (input.registrationSnapshot?.channel === 'app' && input.appHwid) {
+      await this.appTrial?.grantIfEligible(result.userId, input.appHwid);
     }
 
     return result;
