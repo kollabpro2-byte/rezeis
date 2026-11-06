@@ -8,6 +8,7 @@ import { BlockedIdentityService } from '../../blocked-identities/services/blocke
 import { EmailService } from '../../email/services/email.service';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
 import { QuestProgressService } from '../../quests/services/quest-progress.service';
+import { SubscriptionMutationsService } from '../../subscriptions/services/subscription-mutations.service';
 import { QuestType } from '@prisma/client';
 import {
   LinkEmailInitiateDto,
@@ -80,6 +81,7 @@ export class LinkingService {
     @Optional() private readonly events?: SystemEventsService,
     @Optional() private readonly blockedIdentityService?: BlockedIdentityService,
     @Optional() private readonly questProgress?: QuestProgressService,
+    @Optional() private readonly subscriptions?: SubscriptionMutationsService,
   ) {}
 
   // ── Telegram ─────────────────────────────────────────────────────────
@@ -118,7 +120,7 @@ export class LinkingService {
           // because we don't have a Telegram address yet — that's the
           // whole point of the flow. Lookup happens by `userId` plus
           // `purpose`, never by destination, so this stays consistent.
-          destination: input.userId,
+          destination: `${input.userId}:${(input as any).source || 'web'}`,
           codeHash,
           attemptsLeft: LinkingService.DEFAULT_ATTEMPTS_LEFT,
           expiresAt,
@@ -236,6 +238,29 @@ export class LinkingService {
           await this.questProgress.markCompleted(QuestType.LINK_TELEGRAM, newlyLinkedUserId);
         } catch (err: unknown) {
           this.logger.warn({ err, userId: newlyLinkedUserId }, 'Failed to settle LINK_TELEGRAM quest on link');
+        }
+      }
+      // Grant +3 days if the link was initiated from the Android app
+      if (this.subscriptions) {
+        try {
+          const challenge = await this.prismaService.authChallenge.findFirst({
+            where: { webAccountId: { not: undefined }, purpose: LinkingService.TELEGRAM_PURPOSE },
+            orderBy: { createdAt: 'desc' },
+          });
+          // We stored source in destination as userId:source
+          const dest = challenge?.destination || '';
+          if (dest.endsWith(':app')) {
+            const active = await this.prismaService.subscription.findFirst({
+              where: { userId: newlyLinkedUserId, status: 'ACTIVE' },
+              select: { id: true },
+            });
+            if (active) {
+              await this.subscriptions.extend({ subscriptionId: active.id, additionalDays: 3 });
+              this.logger.log(`Granted +3 days to subscription ${active.id} for app Telegram link`);
+            }
+          }
+        } catch (err: unknown) {
+          this.logger.warn({ err, userId: newlyLinkedUserId }, 'Failed to grant +3 days on app Telegram link');
         }
       }
     }

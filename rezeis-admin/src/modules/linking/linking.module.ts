@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module';
+import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 import { EmailModule } from '../email/email.module';
 import { QuestsModule } from '../quests/quests.module';
 import { InternalLinkingController } from './controllers/internal-linking.controller';
