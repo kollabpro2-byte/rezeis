@@ -7,6 +7,8 @@ import { BlockedIdentityKind } from '@prisma/client';
 import { BlockedIdentityService } from '../../blocked-identities/services/blocked-identity.service';
 import { EmailService } from '../../email/services/email.service';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
+import { QuestProgressService } from '../../quests/services/quest-progress.service';
+import { QuestType } from '@prisma/client';
 import {
   LinkEmailInitiateDto,
   LinkEmailVerifyDto,
@@ -77,6 +79,7 @@ export class LinkingService {
     private readonly emailService: EmailService,
     @Optional() private readonly events?: SystemEventsService,
     @Optional() private readonly blockedIdentityService?: BlockedIdentityService,
+    @Optional() private readonly questProgress?: QuestProgressService,
   ) {}
 
   // ── Telegram ─────────────────────────────────────────────────────────
@@ -225,6 +228,16 @@ export class LinkingService {
           source: 'web_cabinet',
         },
       );
+      // Settle LINK_TELEGRAM quest immediately so the cabinet / app can claim
+      // the +3 days bonus without waiting for the event listener or a website
+      // cabinet visit. Idempotent; the unique key absorbs races.
+      if (this.questProgress) {
+        try {
+          await this.questProgress.markCompleted(QuestType.LINK_TELEGRAM, newlyLinkedUserId);
+        } catch (err: unknown) {
+          this.logger.warn({ err, userId: newlyLinkedUserId }, 'Failed to settle LINK_TELEGRAM quest on link');
+        }
+      }
     }
     return result;
   }
