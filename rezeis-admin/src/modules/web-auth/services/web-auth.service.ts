@@ -869,10 +869,25 @@ export class WebAuthService {
       }
       throw new UnauthorizedException('Invalid login or password');
     }
-    const ok = await this.passwordHashService.verifyPassword({
+    let ok = await this.passwordHashService.verifyPassword({
       plainTextPassword: input.password,
       passwordHash: webAccount.passwordHash,
     });
+    // Переход с двойного хеша. До миграции BFF клал в `password` не пароль, а
+    // sha256(пароль), поэтому существующие строки — это scrypt(sha256(пароль)).
+    // Открытый пароль такую строку не откроет: проверяем присланный хеш и, если
+    // он подошёл, сразу перехешируем строку ПАРОЛЕМ. Пользователь входит как
+    // обычно, а запись мигрирует в этот же момент — по одной, без массовой
+    // перезаписи и без риска потерять пароли тех, кто ещё не заходил.
+    let legacyMatched = false;
+    const legacyHash = input.legacyPasswordHash?.trim();
+    if (!ok && legacyHash) {
+      ok = await this.passwordHashService.verifyPassword({
+        plainTextPassword: legacyHash,
+        passwordHash: webAccount.passwordHash,
+      });
+      legacyMatched = ok;
+    }
     if (!ok) {
       throw new UnauthorizedException('Invalid login or password');
     }
@@ -880,6 +895,7 @@ export class WebAuthService {
       webAccountId: webAccount.id,
       storedPasswordHash: webAccount.passwordHash,
       plainTextPassword: input.password,
+      force: legacyMatched,
     });
     return {
       userId: webAccount.userId,
@@ -949,8 +965,15 @@ export class WebAuthService {
     readonly webAccountId: string;
     readonly storedPasswordHash: string;
     readonly plainTextPassword: string;
+    /**
+     * `true` when the row was opened by the LEGACY double hash
+     * (`scrypt(sha256(password))`): `needsRehash` cannot see that — the cost is
+     * current — so the caller has to say so, otherwise the row would keep the
+     * sha256-of-a-password inside it forever.
+     */
+    readonly force?: boolean;
   }): Promise<void> {
-    if (!this.passwordHashService.needsRehash(input.storedPasswordHash, 'subscriber')) {
+    if (!input.force && !this.passwordHashService.needsRehash(input.storedPasswordHash, 'subscriber')) {
       return;
     }
     try {

@@ -1,5 +1,5 @@
 import { Transform } from 'class-transformer';
-import { IsString, Matches, MaxLength, MinLength } from 'class-validator';
+import { IsOptional, IsString, Length, Matches, MaxLength, MinLength } from 'class-validator';
 
 import { loginPolicy } from '../../auth/utils/login-policy.util';
 
@@ -20,4 +20,14 @@ export class LinkedWebAccountSignInDto {
   @MinLength(8)
   @MaxLength(128)
   public password!: string;
+
+  /**
+   * Переходное поле: `sha256(пароль)`, который BFF присылал вместо пароля до
+   * миграции. Проверяется только если открытый пароль не подошёл; при успехе
+   * строка сразу перехешируется паролем. См. `WebAuthLoginDto`.
+   */
+  @IsOptional()
+  @IsString()
+  @Length(1, 128)
+  public legacyPasswordHash?: string;
 }

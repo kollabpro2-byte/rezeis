@@ -337,7 +337,20 @@ export class InternalUserService {
       plainTextPassword: input.password,
       passwordHash: webAccount.passwordHash,
     });
-    if (!isPasswordValid) {
+    // Тот же переходный путь, что в `WebAuthService.login`: строки, записанные
+    // как scrypt(sha256(пароль)), открываются присланным хешем, после чего сразу
+    // перехешируются открытым паролем. См. `WebAuthLoginDto`.
+    let legacyMatched = false;
+    let passwordValid = isPasswordValid;
+    const legacyHash = input.legacyPasswordHash?.trim();
+    if (!passwordValid && legacyHash) {
+      passwordValid = await this.passwordHashService.verifyPassword({
+        plainTextPassword: legacyHash,
+        passwordHash: webAccount.passwordHash,
+      });
+      legacyMatched = passwordValid;
+    }
+    if (!passwordValid) {
       throw new UnauthorizedException('Invalid login or password');
     }
     const user = await this.getRequiredUserById(webAccount.userId);
@@ -352,6 +365,7 @@ export class InternalUserService {
       webAccountId: webAccount.id,
       storedPasswordHash: webAccount.passwordHash,
       plainTextPassword: input.password,
+      force: legacyMatched,
     });
     return mapInternalUserSession(user);
   }
@@ -403,8 +417,14 @@ export class InternalUserService {
     readonly webAccountId: string;
     readonly storedPasswordHash: string;
     readonly plainTextPassword: string;
+    /**
+     * `true` when this row was opened by the legacy double hash
+     * (`scrypt(sha256(password))`): its cost is already current, so
+     * `needsRehash` says no and only an explicit force rewrites it.
+     */
+    readonly force?: boolean;
   }): Promise<void> {
-    if (!this.passwordHashService.needsRehash(input.storedPasswordHash, 'subscriber')) {
+    if (!input.force && !this.passwordHashService.needsRehash(input.storedPasswordHash, 'subscriber')) {
       return;
     }
     try {
