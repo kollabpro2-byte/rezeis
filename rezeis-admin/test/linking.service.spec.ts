@@ -333,7 +333,7 @@ describe('LinkingService', () => {
       webAccountId: 'web-account-1',
       purpose: 'telegram_link',
       channel: 'telegram',
-      destination: 'user-1',
+      destination: 'user-1:web',
       codeHash: hashForTest(actual.code),
       tokenHash: null,
       attemptsLeft: 5,

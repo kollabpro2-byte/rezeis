@@ -1,3 +1,4 @@
+import { SkipThrottle } from '@nestjs/throttler';
 import { Body, Controller, Get, Param, Post, UseGuards, HttpCode, HttpStatus, BadRequestException } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
@@ -8,10 +9,18 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 /**
  * Internal endpoint for the support AI bridge (Grok bot).
  * Accepts API token (InternalAdminAuthGuard) and writes as ADMIN.
+ *
+ * NOT THROTTLED PER ADDRESS. Every call arrives from the cabinet's backend —
+ * one address, on behalf of every customer at once — so the global 600/minute
+ * per-IP limit is a limit on the whole customer base together. The credential
+ * is the shared secret, which the guard checks before anything else runs; the
+ * route therefore does not need the address budget, the same way
+ * `InternalWebAuthController` does not.
  */
 @ApiTags('Internal')
 @Controller('internal/bot/support')
 @UseGuards(InternalAdminAuthGuard)
+@SkipThrottle()
 export class InternalBotSupportController {
   constructor(
     private readonly tickets: SupportTicketsService,

@@ -21,6 +21,17 @@ import {
 
 const plain = (text: string): string => text.replace(/\s/g, ' ')
 
+/**
+ * Складывает разделитель ДИАПАЗОНА к обычному дефису.
+ *
+ * `formatRange` берёт разделитель из ICU/CLDR, а не из нашего кода, и CLDR его
+ * меняет между версиями: для ru-RU это было «–» (U+2013), стало «—» (U+2014).
+ * Из-за этого три теста падали на Node с более новым ICU — то есть на ровном
+ * месте, без единой правки панели. Проверять надо то, что мы контролируем:
+ * даты по краям и порядок, а не глиф, который выбирает библиотека.
+ */
+const dashed = (text: string): string => plain(text).replace(/[\u2010-\u2015]/g, '-')
+
 describe('money', () => {
   it('reads «9,7 тыс. ₽» to a Russian operator and «₽9.7K» to an English one — never «RUB 9.7K»', () => {
     expect(plain(formatMoney(9700, 'RUB', { compact: true, locale: 'ru-RU' }))).toBe('9,7 тыс. ₽')
@@ -83,13 +94,13 @@ describe('the names of the bars', () => {
   it('a day, a week and a month, in Russian, as the server dates them', () => {
     expect(plain(formatBucket({ from: '2026-09-17', to: '2026-09-17' }, 'day', 'axis', 'ru-RU'))).toBe('17 сент.')
     expect(plain(formatBucket({ from: '2026-09-17', to: '2026-09-17' }, 'day', 'full', 'ru-RU'))).toBe('чт, 17 сентября')
-    expect(plain(formatBucket({ from: '2026-06-21', to: '2026-06-27' }, 'week', 'full', 'ru-RU'))).toBe('21–27 июня')
+    expect(dashed(formatBucket({ from: '2026-06-21', to: '2026-06-27' }, 'week', 'full', 'ru-RU'))).toBe('21-27 июня')
     expect(plain(formatBucket({ from: '2026-02-01', to: '2026-02-28' }, 'month', 'full', 'ru-RU'))).toBe('февраль 2026 г.')
   })
 
   it('names a month the window only partly covers by its days', () => {
-    expect(plain(formatBucket({ from: '2025-09-19', to: '2025-09-30' }, 'month', 'full', 'ru-RU'))).toBe('19–30 сентября')
-    expect(plain(formatBucket({ from: '2026-09-01', to: '2026-09-18' }, 'month', 'full', 'en-US'))).toBe('September 1 – 18')
+    expect(dashed(formatBucket({ from: '2025-09-19', to: '2025-09-30' }, 'month', 'full', 'ru-RU'))).toBe('19-30 сентября')
+    expect(dashed(formatBucket({ from: '2026-09-01', to: '2026-09-18' }, 'month', 'full', 'en-US'))).toBe('September 1 - 18')
   })
 })
 
@@ -112,7 +123,7 @@ describe('the dates of the bars in a browser west of UTC', () => {
     expect(new Date('2026-09-18').getDate()).toBe(17)
     expect(plain(formatBucket({ from: '2026-09-18', to: '2026-09-18' }, 'day', 'axis', 'ru-RU'))).toBe('18 сент.')
     expect(plain(formatBucket({ from: '2026-09-18', to: '2026-09-18' }, 'day', 'full', 'ru-RU'))).toBe('пт, 18 сентября')
-    expect(plain(formatBucket({ from: '2026-09-13', to: '2026-09-19' }, 'week', 'full', 'ru-RU'))).toBe('13–19 сентября')
+    expect(dashed(formatBucket({ from: '2026-09-13', to: '2026-09-19' }, 'week', 'full', 'ru-RU'))).toBe('13-19 сентября')
     expect(plain(formatBucket({ from: '2026-09-01', to: '2026-09-30' }, 'month', 'full', 'ru-RU'))).toBe('сентябрь 2026 г.')
     expect(plain(formatDay('2026-09-01', 'axis', 'ru-RU'))).toBe('1 сент.')
     expect(plain(formatCohortMonth('2026-09', 'ru-RU'))).toBe('сент. 2026 г.')

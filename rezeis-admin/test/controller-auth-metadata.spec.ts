@@ -89,6 +89,14 @@ const UNAUTHENTICATED_ROUTES: ReadonlyMap<string, string> = new Map([
   // than an admin or internal credential, because the caller is a quest
   // partner's server.
   ['QuestPartnerCallbackController.callback', 'guarded by QuestPartnerCallbackGuard (HMAC)'],
+  // Support attachments a client opens from a ticket link, with no session yet.
+  // Not open: the handler compares the `token` query parameter to
+  // SUPPORT_ATTACHMENT_PUBLIC_TOKEN before it touches storage, and answers 403
+  // when the variable is unset.
+  [
+    'PublicAttachmentController.download',
+    'support attachment download for a client without a session, authorised by the shared `token` query parameter',
+  ],
 ]);
 
 /**

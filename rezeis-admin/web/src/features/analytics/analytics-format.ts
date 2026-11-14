@@ -215,8 +215,13 @@ function isWholeMonth(bucket: AnalyticsBucketLabel): boolean {
 
 /**
  * A bar's name. `axis`: short enough to sit under a bar («17 сент.», «июн.»);
- * `full`: what the tooltip heads with («чт, 17 сентября», «17–23 июня»,
+ * `full`: what the tooltip heads with («чт, 17 сентября», «17-23 июня»,
  * «сентябрь 2026 г.», or the days of a month the window only partly covers).
+ *
+ * A RANGE gets its separator from `Intl.DateTimeFormat.formatRange`, i.e. from
+ * the runtime's ICU/CLDR — not from this file. CLDR has changed that glyph
+ * between versions (ru-RU went from «–» U+2013 to «—» U+2014), so the tests fold
+ * any dash to a hyphen instead of pinning the one this machine happens to carry.
  */
 export function formatBucket(
   bucket: AnalyticsBucketLabel,
