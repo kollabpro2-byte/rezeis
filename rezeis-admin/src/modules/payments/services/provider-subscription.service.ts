@@ -59,6 +59,7 @@ import {
   CANCEL_ALERT_AFTER_ATTEMPTS,
   HIDDEN_REASON_MANUAL_CABINET,
   HIDDEN_REASON_STALE,
+  isProcessingStuck,
   needsManualProviderCancel,
   providerCancelSupported,
   SUPERSEDED_BY_NEWER_AUTOPAY,
@@ -2758,10 +2759,10 @@ export class ProviderSubscriptionService {
         });
       }
 
-      // Antilopay в PROCESSING не отменяет: `payment/recurrent/cancel` проходит,
-      // но повторный `check` всё равно отдаёт PROCESSING, и строка висит.
-      // Значит API не зовём — копим попытки и зовём оператора в ЛК.
-      if (row.gatewayType === PaymentGatewayType.ANTILOPAY && needsManualProviderCancel(row.providerStatus)) {
+      // PROCESSING по доке — «ожидает результат оплаты», то есть ещё активен:
+      // отменять пробуем. Пропускаем API только когда он действительно залип,
+      // иначе отмена проходит, но статус остаётся PROCESSING, и строка висит.
+      if (row.gatewayType === PaymentGatewayType.ANTILOPAY && this.isProcessingStuck(row)) {
         await this.deferCancel(
           row,
           `Antilopay did not cancel the recurrent (status ${row.providerStatus ?? 'unknown'})`,
@@ -2797,6 +2798,27 @@ export class ProviderSubscriptionService {
       }
     }
     return cancelled;
+  }
+
+  /**
+   * Завис ли `PROCESSING` по-настоящему.
+   *
+   * По документации Antilopay `PROCESSING` — «активен, в данный момент ожидает
+   * результат рекуррентной оплаты», то есть обычное идущее списание. Для
+   * активного рекуррента `payment/recurrent/cancel` принимается (код 28 значит
+   * только «не активен»), поэтому свежий PROCESSING мы отменять пробуем, а не
+   * сразу зовём оператора. «Не отменяется» — это когда он реально залип: дата
+   * списания ушла больше суток назад (`stalled_since`) или уже была неудачная
+   * попытка отмены.
+   */
+  private isProcessingStuck(
+    row: Pick<ProviderSubscription, 'providerStatus' | 'stalledSince' | 'cancelAttempts'>,
+  ): boolean {
+    return isProcessingStuck({
+      providerStatus: row.providerStatus,
+      stalledSince: row.stalledSince ?? null,
+      cancelAttempts: row.cancelAttempts ?? 0,
+    });
   }
 
   /**
@@ -2949,13 +2971,13 @@ export class ProviderSubscriptionService {
     return result;
   }
 
-  /** Отмена «лишней» строки по режиму `cancel`; PROCESSING уходит оператору. */
+  /** Отмена «лишней» строки по режиму `cancel`; залипший PROCESSING уходит оператору. */
   private async cancelSupersededRow(
     row: ProviderSubscription,
     note: string,
     result: { cancelled: number; manual: number },
   ): Promise<void> {
-    if (!providerCancelSupported(row.providerStatus)) {
+    if (this.isProcessingStuck(row)) {
       await this.deferCancel(row, `Antilopay did not cancel the superseded recurrent (${note})`, true);
       result.manual += 1;
       return;

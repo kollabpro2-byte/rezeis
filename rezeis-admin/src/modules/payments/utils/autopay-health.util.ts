@@ -152,3 +152,23 @@ export function needsManualProviderCancel(providerStatus: string | null): boolea
   return (providerStatus ?? '').trim().toUpperCase() === 'PROCESSING';
 }
 
+/**
+ * Завис ли `PROCESSING` по-настоящему.
+ *
+ * По документации Antilopay `PROCESSING` — «активен, в данный момент ожидает
+ * результат рекуррентной оплаты»: обычное идущее списание. Для активного
+ * рекуррента `payment/recurrent/cancel` принимается (код 28 значит только «не
+ * активен»), поэтому свежий PROCESSING отменять пробуем. «Не отменяется» — это
+ * когда он реально залип: дата списания ушла больше суток назад
+ * (`stalled_since` заполнен) или уже была неудачная попытка отмены.
+ */
+export function isProcessingStuck(input: {
+  readonly providerStatus: string | null;
+  readonly stalledSince: Date | null;
+  readonly cancelAttempts?: number;
+}): boolean {
+  if (!needsManualProviderCancel(input.providerStatus)) return false;
+  if (input.stalledSince !== null) return true;
+  return (input.cancelAttempts ?? 0) >= 1;
+}
+

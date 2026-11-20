@@ -9,6 +9,7 @@ import {
   SUPERSEDED_BY_NEWER_AUTOPAY,
   autopayHealth,
   cancelBackoffMs,
+  isProcessingStuck,
   isStalledAutopay,
   needsManualProviderCancel,
   providerCancelSupported,
@@ -246,11 +247,27 @@ describe('autopay-health.util', () => {
       assert.equal(providerCancelSupported(null), false);
     });
 
-    it('PROCESSING требует ручной отмены в личном кабинете', () => {
-      assert.equal(needsManualProviderCancel('PROCESSING'), true);
-      assert.equal(needsManualProviderCancel('processing'), true);
-      assert.equal(needsManualProviderCancel('ACTIVE'), false);
-      assert.equal(needsManualProviderCancel(null), false);
+    it('PROCESSING требует ручной отмены только когда залип', () => {
+      // Свежий PROCESSING — идущее списание: по доке рекуррент ещё активен,
+      // значит отмену пробуем сами.
+      assert.equal(isProcessingStuck({ providerStatus: 'PROCESSING', stalledSince: null }), false);
+      assert.equal(
+        isProcessingStuck({ providerStatus: 'PROCESSING', stalledSince: null, cancelAttempts: 0 }),
+        false,
+      );
+      // Дата списания ушла больше суток назад — залип, отменять руками в ЛК.
+      assert.equal(
+        isProcessingStuck({ providerStatus: 'PROCESSING', stalledSince: new Date('2026-11-19T10:00:00Z') }),
+        true,
+      );
+      // Уже пробовали и не вышло — второй раз API не колотим.
+      assert.equal(
+        isProcessingStuck({ providerStatus: 'PROCESSING', stalledSince: null, cancelAttempts: 1 }),
+        true,
+      );
+      // Не PROCESSING — правило не про них.
+      assert.equal(isProcessingStuck({ providerStatus: 'ACTIVE', stalledSince: new Date() }), false);
+      assert.equal(isProcessingStuck({ providerStatus: null, stalledSince: null }), false);
     });
   });
 
