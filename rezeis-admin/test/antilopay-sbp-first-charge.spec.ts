@@ -137,6 +137,8 @@ function world(options: WorldOptions = {}) {
     cancelNextTryAt: null,
     cancelLastError: null,
     manualCancelRequired: false,
+    hiddenAt: null,
+    hiddenReason: null,
     createdAt: new Date('2026-10-18T09:00:00.000Z'),
     updatedAt: new Date(),
     ...options.row,

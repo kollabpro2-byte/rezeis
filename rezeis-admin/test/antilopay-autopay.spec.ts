@@ -951,6 +951,8 @@ function harness(initial: Partial<ProviderSubscription> = {}) {
     cancelNextTryAt: null,
     cancelLastError: null,
     manualCancelRequired: false,
+    hiddenAt: null,
+    hiddenReason: null,
     createdAt: new Date(),
     updatedAt: new Date(),
     ...initial,
