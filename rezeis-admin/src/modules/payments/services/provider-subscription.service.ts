@@ -2954,7 +2954,7 @@ export class ProviderSubscriptionService {
         hiddenAt: null,
         subscriptionId: { not: null },
       },
-      select: { id: true, subscriptionId: true, nextChargeAt: true, durationDays: true },
+      select: { id: true, subscriptionId: true, nextChargeAt: true, durationDays: true, strandedReason: true },
       take: 500,
     });
     const ids = [...new Set(rows.flatMap((row) => (row.subscriptionId === null ? [] : [row.subscriptionId])))];
@@ -2979,17 +2979,20 @@ export class ProviderSubscriptionService {
       if (expiresAt.getTime() <= coveredUntil.getTime() + DAY_MS) continue;
 
       const reason = `superseded: renewed by another payment (access until ${expiresAt.toISOString().slice(0, 10)})`;
-      await this.prismaService.providerSubscription.updateMany({
-        where: { id: row.id },
-        data: { strandedReason: reason, strandedAt: now },
-      });
-      result.marked += 1;
-      await this.writeSystemAudit('payments.autopay.superseded_renewed_elsewhere', {
-        rowId: row.id,
-        subscriptionId: row.subscriptionId,
-        expiresAt: expiresAt.toISOString(),
-        mode,
-      });
+      // Уже помечено этим же — не пишем повторно каждые десять минут.
+      if (row.strandedReason !== reason) {
+        await this.prismaService.providerSubscription.updateMany({
+          where: { id: row.id },
+          data: { strandedReason: reason, strandedAt: now },
+        });
+        result.marked += 1;
+        await this.writeSystemAudit('payments.autopay.superseded_renewed_elsewhere', {
+          rowId: row.id,
+          subscriptionId: row.subscriptionId,
+          expiresAt: expiresAt.toISOString(),
+          mode,
+        });
+      }
       if (mode !== 'cancel') continue;
       const full = await this.prismaService.providerSubscription.findUnique({ where: { id: row.id } });
       if (full === null) continue;
@@ -3036,20 +3039,23 @@ export class ProviderSubscriptionService {
       for (const row of rows) {
         if (row.id === newest.id) continue;
         // `?.` — у строк из тестов поле может отсутствовать, у базы — null.
-      if ((row.cancelNextTryAt?.getTime() ?? 0) > now.getTime()) continue;
-        await this.prismaService.providerSubscription.updateMany({
-          where: { id: row.id },
-          data: { strandedReason: SUPERSEDED_BY_NEWER_AUTOPAY, strandedAt: row.strandedAt ?? now },
-        });
-        result.marked += 1;
-        await this.writeSystemAudit('payments.autopay.superseded_by_newer_autopay', {
-          rowId: row.id,
-          newerRowId: newest.id,
-          subscriptionId: row.subscriptionId,
-          gateway: row.gatewayType,
-          providerStatus: row.providerStatus,
-          mode,
-        });
+        if ((row.cancelNextTryAt?.getTime() ?? 0) > now.getTime()) continue;
+        // Уже помечено этой же причиной — повторно не пишем, журнал не засоряем.
+        if (row.strandedReason !== SUPERSEDED_BY_NEWER_AUTOPAY) {
+          await this.prismaService.providerSubscription.updateMany({
+            where: { id: row.id },
+            data: { strandedReason: SUPERSEDED_BY_NEWER_AUTOPAY, strandedAt: row.strandedAt ?? now },
+          });
+          result.marked += 1;
+          await this.writeSystemAudit('payments.autopay.superseded_by_newer_autopay', {
+            rowId: row.id,
+            newerRowId: newest.id,
+            subscriptionId: row.subscriptionId,
+            gateway: row.gatewayType,
+            providerStatus: row.providerStatus,
+            mode,
+          });
+        }
         if (mode !== 'cancel') continue;
         const outcome = { cancelled: 0, manual: 0 };
         await this.cancelSupersededRow(row, `новой строкой ${newest.id}`, outcome);
