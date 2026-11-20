@@ -728,6 +728,19 @@ export class AdminAutopayService implements OnModuleDestroy {
   }
 
   /**
+   * «Отменено вручную в ЛК»: оператор сам отменил рекуррент в кабинете
+   * провайдера. Сверяемся — если провайдер подтвердил отмену, строка
+   * становится CANCELLED и скрывается из таблицы.
+   */
+  public async markCancelledInCabinet(rowId: string): Promise<{
+    readonly status: string;
+    readonly providerStatus: string | null;
+    readonly hidden: boolean;
+  }> {
+    return this.providerSubscriptions.markCancelledInCabinet(rowId);
+  }
+
+  /**
    * «Отменить автосписание» из таблицы: строку ищем по её id, владельца берём
    * из неё же — оператору не нужно знать userId.
    */

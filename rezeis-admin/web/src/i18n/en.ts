@@ -4470,6 +4470,9 @@ export const en = {
     exportCsv: 'Export CSV',
     exportFailed: 'Could not export the CSV',
     duplicate: 'Duplicate: other live rows — {{count}}',
+    cancelledInCabinet: 'Cancelled in the cabinet',
+    cancelledInCabinetDone: 'The provider confirmed the cancellation; the row is hidden',
+    cancelledInCabinetNotYet: 'The provider has not cancelled it yet; the row stays in the list',
     filters: {
       stalled: 'Stuck at the provider',
       desync: 'Charge date has passed',
@@ -4477,6 +4480,7 @@ export const en = {
       dueToday: 'Charges today',
       due7d: 'Charges within 7 days',
       failedAttempts: 'Has failed attempts',
+      pastDueActive: 'PAST_DUE with a live subscription',
       stranded: 'Flagged for cancellation',
     },
     renewal: {

@@ -57,6 +57,20 @@ export class AdminPaymentAutopayController {
   }
 
   /**
+   * «Отменено вручную в ЛК»: оператор отменил рекуррент в кабинете провайдера.
+   * Сверяемся с провайдером; подтверждённая отмена скрывает строку.
+   */
+  @Post(':providerSubscriptionRowId/cancelled-in-cabinet')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Оператор отменил рекуррент в ЛК провайдера: сверить и скрыть строку' })
+  @RequirePermission('payments', 'edit')
+  public async markCancelledInCabinet(
+    @Param('providerSubscriptionRowId') providerSubscriptionRowId: string,
+  ): Promise<{ status: string; providerStatus: string | null; hidden: boolean }> {
+    return this.adminAutopayService.markCancelledInCabinet(providerSubscriptionRowId);
+  }
+
+  /**
    * CSV текущего фильтра. Только внутренние id и суммы: логины, email и
    * телефоны в выгрузку не попадают.
    */

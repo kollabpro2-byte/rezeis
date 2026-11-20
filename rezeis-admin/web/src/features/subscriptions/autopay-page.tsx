@@ -155,6 +155,7 @@ export default function AutopayPage() {
   const [duplicatesOnly, setDuplicatesOnly] = useState(false)
   const [dueInDays, setDueInDays] = useState<number | null>(null)
   const [failedAttemptsOnly, setFailedAttemptsOnly] = useState(false)
+  const [pastDueWithActive, setPastDueWithActive] = useState(false)
   const [strandedOnly, setStrandedOnly] = useState(false)
   const [page, setPage] = useState(0)
   const [exporting, setExporting] = useState(false)
@@ -169,9 +170,10 @@ export default function AutopayPage() {
     if (duplicatesOnly) params.set('duplicatesOnly', 'true')
     if (dueInDays !== null) params.set('dueInDays', String(dueInDays))
     if (failedAttemptsOnly) params.set('failedAttemptsOnly', 'true')
+    if (pastDueWithActive) params.set('pastDueWithActive', 'true')
     if (strandedOnly) params.set('strandedOnly', 'true')
     return params.toString()
-  }, [search, includeEnded, health, duplicatesOnly, dueInDays, failedAttemptsOnly, strandedOnly, page])
+  }, [search, includeEnded, health, duplicatesOnly, dueInDays, failedAttemptsOnly, pastDueWithActive, strandedOnly, page])
 
   const { data, isLoading, refetch, isFetching } = useQuery<AutopayList>({
     queryKey: adminQueryKeys.subscriptions.autopay(queryParams),
@@ -202,6 +204,29 @@ export default function AutopayPage() {
           : result.state === 'REFUND_ENDING'
             ? t('autopayPage.cancelRefundEnding')
             : t('autopayPage.cancelDone'),
+      )
+      await queryClient.invalidateQueries({
+        queryKey: adminQueryKeys.subscriptions.autopay(queryParams),
+      })
+    },
+    onError: (error) => toast.error(getErrorMessage(error, t('autopayPage.cancelFailed'))),
+  })
+
+  /**
+   * «Отменено вручную в ЛК»: провайдер не отменяет PROCESSING-строку, и это
+   * делает оператор. Кнопка сверяет состояние и скрывает строку, если отмена
+   * подтвердилась.
+   */
+  const cancelledInCabinet = useMutation({
+    mutationFn: async (row: AutopayRow) =>
+      (
+        await api.post<{ status: string; providerStatus: string | null; hidden: boolean }>(
+          `/admin/payments/autopay/${row.providerSubscriptionRowId}/cancelled-in-cabinet`,
+        )
+      ).data,
+    onSuccess: async (result) => {
+      toast[result.hidden ? 'success' : 'info'](
+        result.hidden ? t('autopayPage.cancelledInCabinetDone') : t('autopayPage.cancelledInCabinetNotYet'),
       )
       await queryClient.invalidateQueries({
         queryKey: adminQueryKeys.subscriptions.autopay(queryParams),
@@ -281,6 +306,7 @@ export default function AutopayPage() {
           { key: 'today', active: dueInDays === 0, label: t('autopayPage.filters.dueToday'), toggle: () => setDueInDays(dueInDays === 0 ? null : 0) },
           { key: '7d', active: dueInDays === 7, label: t('autopayPage.filters.due7d'), toggle: () => setDueInDays(dueInDays === 7 ? null : 7) },
           { key: 'failed', active: failedAttemptsOnly, label: t('autopayPage.filters.failedAttempts'), toggle: () => setFailedAttemptsOnly((value) => !value) },
+          { key: 'pastdue', active: pastDueWithActive, label: t('autopayPage.filters.pastDueActive'), toggle: () => setPastDueWithActive((value) => !value) },
           { key: 'stranded', active: strandedOnly, label: t('autopayPage.filters.stranded'), toggle: () => setStrandedOnly((value) => !value) },
         ].map((chip) => (
           <Button
@@ -482,7 +508,18 @@ export default function AutopayPage() {
                     </TableCell>
                     <TableCell className="text-right">
                       <PermissionGate resource="payments" action="edit">
-                        <AlertDialog>
+                        <div className="flex items-center justify-end gap-1">
+                          {row.manualCancelRequired && (
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              disabled={cancelledInCabinet.isPending}
+                              onClick={() => cancelledInCabinet.mutate(row)}
+                            >
+                              {t('autopayPage.cancelledInCabinet')}
+                            </Button>
+                          )}
+                          <AlertDialog>
                           <AlertDialogTrigger asChild>
                             <Button
                               variant="ghost"
@@ -511,6 +548,7 @@ export default function AutopayPage() {
                             </AlertDialogFooter>
                           </AlertDialogContent>
                         </AlertDialog>
+                        </div>
                       </PermissionGate>
                     </TableCell>
                   </TableRow>

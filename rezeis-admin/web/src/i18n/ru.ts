@@ -4595,6 +4595,9 @@ export const ru = {
     exportCsv: 'Выгрузить CSV',
     exportFailed: 'Не удалось выгрузить CSV',
     duplicate: 'Дубль: ещё живых строк — {{count}}',
+    cancelledInCabinet: 'Отменено вручную в ЛК',
+    cancelledInCabinetDone: 'Отмена подтверждена провайдером, строка скрыта',
+    cancelledInCabinetNotYet: 'Провайдер ещё не отменил: строка осталась в списке',
     filters: {
       stalled: 'Рассинхрон: зависла у провайдера',
       desync: 'Дата списания прошла',
@@ -4602,6 +4605,7 @@ export const ru = {
       dueToday: 'Списание сегодня',
       due7d: 'Списание за 7 дней',
       failedAttempts: 'Есть неудачные попытки',
+      pastDueActive: 'PAST_DUE с активной подпиской',
       stranded: 'Помечены к отмене',
     },
     renewal: {

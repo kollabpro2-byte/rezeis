@@ -57,6 +57,7 @@ import {
   autopayHealth,
   cancelBackoffMs,
   CANCEL_ALERT_AFTER_ATTEMPTS,
+  HIDDEN_REASON_MANUAL_CABINET,
   HIDDEN_REASON_STALE,
   needsManualProviderCancel,
   providerCancelSupported,
@@ -2607,6 +2608,50 @@ export class ProviderSubscriptionService {
       where: { id, hiddenAt: null },
       data: { hiddenAt: now, hiddenReason: HIDDEN_REASON_STALE },
     });
+  }
+
+  /**
+   * Оператор отменил рекуррент руками в ЛК Antilopay и нажал «Отменено вручную
+   * в ЛК». Сверяемся с провайдером: если он подтверждает отмену — строка
+   * становится CANCELLED и скрывается; если ещё PROCESSING — остаётся на виду
+   * и снова ждёт оператора.
+   */
+  public async markCancelledInCabinet(rowId: string): Promise<{
+    readonly status: ProviderSubscriptionStatus;
+    readonly providerStatus: string | null;
+    readonly hidden: boolean;
+  }> {
+    const row = await this.prismaService.providerSubscription.findUnique({ where: { id: rowId } });
+    if (row === null) throw new NotFoundException('Provider subscription not found');
+    await this.syncRow(row);
+    const fresh = await this.prismaService.providerSubscription.findUnique({
+      where: { id: rowId },
+      select: { status: true, providerStatus: true },
+    });
+    if (fresh === null) throw new NotFoundException('Provider subscription not found');
+
+    const hidden = fresh.status === ProviderSubscriptionStatus.CANCELLED;
+    if (hidden) {
+      await this.prismaService.providerSubscription.updateMany({
+        where: { id: rowId },
+        data: {
+          hiddenAt: new Date(),
+          hiddenReason: HIDDEN_REASON_MANUAL_CABINET,
+          manualCancelRequired: false,
+          cancelAttempts: 0,
+          cancelNextTryAt: null,
+          cancelLastError: null,
+        },
+      });
+    }
+    await this.writeSystemAudit('payments.autopay.manual_cancel_in_cabinet', {
+      rowId,
+      gateway: row.gatewayType,
+      providerStatusBefore: row.providerStatus,
+      providerStatusAfter: fresh.providerStatus,
+      hidden,
+    });
+    return { status: fresh.status, providerStatus: fresh.providerStatus, hidden };
   }
 
   /**

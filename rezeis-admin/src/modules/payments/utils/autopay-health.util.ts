@@ -123,6 +123,9 @@ export function readStaleDays(value: unknown, fallback: number = DEFAULT_STALE_D
 /** Причина скрытия для ежедневной уборки. */
 export const HIDDEN_REASON_STALE = 'stale_autopay';
 
+/** Причина скрытия: оператор отменил рекуррент руками в ЛК Antilopay. */
+export const HIDDEN_REASON_MANUAL_CABINET = 'manual_cancel_in_cabinet';
+
 /** Причина «лишней» строки: на подписке появилась более новая живая автоподписка. */
 export const SUPERSEDED_BY_NEWER_AUTOPAY = 'superseded: newer live autopay for the same subscription';
 

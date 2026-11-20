@@ -213,6 +213,7 @@ describe('AdminPaymentAutopayController', () => {
       'summary',
       'cancelById',
       'exportCsv',
+      'markCancelledInCabinet',
     ]);
 
     const list = routeLabel(BASE_PATH, RequestMethod.GET, 'users/:userId');
@@ -235,6 +236,19 @@ describe('AdminPaymentAutopayController', () => {
     const cancelById = routeLabel(BASE_PATH, RequestMethod.POST, ':providerSubscriptionRowId/cancel');
     assertRoute(AdminPaymentAutopayController.prototype.cancelById, { method: RequestMethod.POST, path: ':providerSubscriptionRowId/cancel' }, cancelById);
     assertRoutePermission(AdminPaymentAutopayController.prototype.cancelById, { resource: 'payments', action: 'edit' }, cancelById);
+
+    // «Отменено вручную в ЛК» — та же правка платежей: меняет только наши данные.
+    const inCabinet = routeLabel(BASE_PATH, RequestMethod.POST, ':providerSubscriptionRowId/cancelled-in-cabinet');
+    assertRoute(
+      AdminPaymentAutopayController.prototype.markCancelledInCabinet,
+      { method: RequestMethod.POST, path: ':providerSubscriptionRowId/cancelled-in-cabinet' },
+      inCabinet,
+    );
+    assertRoutePermission(
+      AdminPaymentAutopayController.prototype.markCancelledInCabinet,
+      { resource: 'payments', action: 'edit' },
+      inCabinet,
+    );
 
     const cancelPath = 'users/:userId/provider-subscriptions/:providerSubscriptionRowId/cancel';
     const cancel = routeLabel(BASE_PATH, RequestMethod.POST, cancelPath);
