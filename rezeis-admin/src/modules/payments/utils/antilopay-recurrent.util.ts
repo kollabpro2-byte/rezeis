@@ -422,10 +422,24 @@ function readDay(value: unknown): Date | null {
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
-/** `2025-07-20 14:30:00.123456`, read as UTC. Only the order of payments and the date depend on it. */
-function readTimestamp(value: unknown): Date | null {
+/**
+ * `2025-07-20 14:30:00.123456` — время Antilopay в Europe/Moscow (UTC+3).
+ *
+ * Раньше строка читалась как UTC, и `last_charge_at` уезжал на 3 часа: платёж,
+ * созданный в 18:04 MSK, показывался как 21:04 MSK. Зона в строке не указана,
+ * поэтому её задаём сами; строка с `T` и/или смещением разбирается как есть.
+ */
+export function readAntilopayTimestamp(value: unknown): Date | null {
   const text = readText(value);
   if (text === null) return null;
-  const parsed = new Date(text.includes('T') ? text : `${text.replace(' ', 'T')}Z`);
+  const hasZone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(text);
+  const normalized = text.includes('T') ? text : text.replace(' ', 'T');
+  const iso = hasZone ? normalized : `${normalized}+03:00`;
+  const parsed = new Date(iso);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+/** {@link readAntilopayTimestamp} для мест, где нужна только дата. */
+function readTimestamp(value: unknown): Date | null {
+  return readAntilopayTimestamp(value);
 }

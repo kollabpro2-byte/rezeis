@@ -17,7 +17,20 @@ export class AdminAutopayListQueryDto {
   @MaxLength(120)
   public readonly search?: string;
 
-  @ApiPropertyOptional({ enum: ProviderSubscriptionStatus })
+  @ApiPropertyOptional({
+    description: 'Статусы через запятую: ACTIVE,PAST_DUE,PENDING,CANCELLED,FAILED',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  public readonly statuses?: string;
+
+  @ApiPropertyOptional({ description: 'Добавить завершённые и несостоявшиеся' })
+  @IsOptional()
+  @Type(() => Boolean)
+  public readonly includeEnded?: boolean;
+
+  @ApiPropertyOptional({ enum: ProviderSubscriptionStatus, description: 'Один статус (совместимость)' })
   @IsOptional()
   @IsEnum(ProviderSubscriptionStatus)
   public readonly status?: ProviderSubscriptionStatus;

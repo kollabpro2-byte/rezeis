@@ -4590,6 +4590,27 @@ export const ru = {
     cancel: 'Отменить',
     cancelDone: 'Автосписание отменяется',
     cancelFailed: 'Не удалось отменить автосписание',
+    confirmTitle: 'Отменить автосписание?',
+    confirmBody:
+      'Клиент: {{login}}. Платёжка: {{gateway}}. Следующее списание: {{date}}. Провайдер перестанет списывать, доступ останется до конца оплаченного периода.',
+    confirmKeep: 'Оставить',
+    confirmCancel: 'Отменить автосписание',
+    syncedAt: 'сверено {{at}}',
+    stranded: 'Помечена: {{reason}}',
+    manualCancel: 'Провайдер не отменяет сам — отмените в ЛК Antilopay',
+    cancelFailedTimes: 'Отмена не прошла (попыток: {{count}})',
+    summary: {
+      active: 'Активных',
+      pastDue: 'Не смогли списать',
+      stalled: 'Зависших',
+      expected: 'Ждём за 7 дней / за 30',
+    },
+    health: {
+      OK: 'В норме',
+      STALLED: 'Зависла у провайдера',
+      PAST_DUE: 'Не списано',
+      DESYNC: 'Рассинхрон даты',
+    },
     prev: 'Назад',
     next: 'Вперёд',
     columns: {

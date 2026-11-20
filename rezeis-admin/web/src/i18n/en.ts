@@ -4465,6 +4465,27 @@ export const en = {
     cancel: 'Cancel',
     cancelDone: 'The autopay is being cancelled',
     cancelFailed: 'Could not cancel the autopay',
+    confirmTitle: 'Cancel the autopay?',
+    confirmBody:
+      'Customer: {{login}}. Gateway: {{gateway}}. Next charge: {{date}}. The provider stops charging; access stays until the paid period ends.',
+    confirmKeep: 'Keep it',
+    confirmCancel: 'Cancel the autopay',
+    syncedAt: 'synced {{at}}',
+    stranded: 'Flagged: {{reason}}',
+    manualCancel: 'The provider does not cancel it — cancel in the Antilopay cabinet',
+    cancelFailedTimes: 'Cancellation failed (attempts: {{count}})',
+    summary: {
+      active: 'Active',
+      pastDue: 'Charge failed',
+      stalled: 'Stalled',
+      expected: 'Expected in 7d / 30d',
+    },
+    health: {
+      OK: 'Healthy',
+      STALLED: 'Stalled at the provider',
+      PAST_DUE: 'Not charged',
+      DESYNC: 'Date mismatch',
+    },
     prev: 'Back',
     next: 'Next',
     columns: {

@@ -13,6 +13,7 @@ import {
   readAutopayAttempts,
   summariseAutopayAttempts,
 } from '../utils/autopay-log.util';
+import { type AutopayHealth, autopayHealth } from '../utils/autopay-health.util';
 import { AFTER_RESPONSE_SHUTDOWN_WAIT_MS } from './payment-reconciliation.service';
 import { OperatorProviderSubscriptionInterface, ProviderSubscriptionService } from './provider-subscription.service';
 import { SavedPaymentMethodService, SwitchedOffMethod } from './saved-payment-method.service';
@@ -64,11 +65,17 @@ export interface AdminAutopayRowInterface {
   /** CARD или SBP (Antilopay различает); null у шлюзов без выбора метода. */
   readonly method: string | null;
   readonly status: ProviderSubscriptionStatus;
+  /** Слово провайдера: ACTIVE, PROCESSING, ACTIVE_FAILED, CANCEL, … */
+  readonly providerStatus: string | null;
+  /** Здоровье: OK / STALLED / PAST_DUE / DESYNC — то, что видит оператор. */
+  readonly health: AutopayHealth;
   /** Когда автосписание подключено (подписка подписана). */
   readonly connectedAt: string;
   /** Когда провайдер спишет в следующий раз. */
   readonly nextChargeAt: string | null;
   readonly lastChargeAt: string | null;
+  /** Когда панель последний раз сверяла строку с провайдером. */
+  readonly lastSyncedAt: string | null;
   /** Когда кончается VPN-подписка, которую эти списания продлевают. */
   readonly expiresAt: string | null;
   /** Сколько успешных и неуспешных попыток было, и даты последних. */
@@ -78,6 +85,34 @@ export interface AdminAutopayRowInterface {
   readonly amount: string;
   readonly currency: string;
   readonly planId: string;
+  /** Списано рекуррентом / сколько списаний планирует провайдер. */
+  readonly appliedChargeCount: number;
+  readonly plannedChargeCount: number | null;
+  /** Когда провайдер планирует закончить серию списаний. */
+  readonly endsAt: string | null;
+  /** С какого момента строка считается зависшей (если считается). */
+  readonly stalledSince: string | null;
+  /** Почему строка лишняя (заменена / продлена вручную) — по режиму `mark`. */
+  readonly strandedReason: string | null;
+  readonly strandedAt: string | null;
+  /** Попытки отменить у провайдера и последняя ошибка. */
+  readonly cancelAttempts: number;
+  readonly cancelNextTryAt: string | null;
+  readonly cancelLastError: string | null;
+  /** Провайдер не отменяет сам — оператору нужно сделать это в ЛК Antilopay. */
+  readonly manualCancelRequired: boolean;
+}
+
+/** Сводка вкладки: статусы, здоровье и ожидаемые списания. */
+export interface AdminAutopaySummaryInterface {
+  readonly byStatus: Readonly<Record<string, number>>;
+  readonly byHealth: Readonly<Record<string, number>>;
+  readonly stalled: number;
+  readonly expected: ReadonlyArray<{
+    readonly currency: string;
+    readonly in7d: string;
+    readonly in30d: string;
+  }>;
 }
 
 /** Ответ таблицы: страница и общее число строк под фильтром. */
@@ -155,18 +190,18 @@ export class AdminAutopayService implements OnModuleDestroy {
   public async listAll(query: {
     readonly search?: string;
     readonly status?: ProviderSubscriptionStatus;
+    /** Статусы через запятую; важнее одиночного `status`. */
+    readonly statuses?: string;
+    /** Добавить завершённые (`CANCELLED`) и несостоявшиеся (`FAILED`). */
+    readonly includeEnded?: boolean;
     readonly take?: number;
     readonly skip?: number;
+    /** Момент для health: подменяется в тестах. */
+    readonly now?: Date;
   }): Promise<AdminAutopayListInterface> {
     const take = Math.min(Math.max(query.take ?? 50, 1), 200);
     const skip = Math.max(query.skip ?? 0, 0);
-    const statuses = query.status === undefined
-      ? [
-          ProviderSubscriptionStatus.ACTIVE,
-          ProviderSubscriptionStatus.PAST_DUE,
-          ProviderSubscriptionStatus.PENDING,
-        ]
-      : [query.status];
+    const statuses = resolveStatuses(query);
     const search = query.search?.trim();
 
     const where = {
@@ -199,14 +234,26 @@ export class AdminAutopayService implements OnModuleDestroy {
           gatewayType: true,
           method: true,
           status: true,
+          providerStatus: true,
           createdAt: true,
           nextChargeAt: true,
           lastChargeAt: true,
+          lastSyncedAt: true,
+          endsAt: true,
           amount: true,
           currency: true,
           planId: true,
           attempts: true,
           subscriptionId: true,
+          appliedChargeCount: true,
+          plannedChargeCount: true,
+          stalledSince: true,
+          strandedReason: true,
+          strandedAt: true,
+          cancelAttempts: true,
+          cancelNextTryAt: true,
+          cancelLastError: true,
+          manualCancelRequired: true,
           user: { select: { username: true, email: true, telegramId: true } },
         },
       }),
@@ -224,6 +271,7 @@ export class AdminAutopayService implements OnModuleDestroy {
         });
     const expiresById = new Map(subscriptions.map((sub) => [sub.id, sub.expiresAt] as const));
 
+    const now = query.now ?? new Date();
     const items = rows.map((row): AdminAutopayRowInterface => {
       const history = readAutopayAttempts(row.attempts);
       return {
@@ -237,9 +285,17 @@ export class AdminAutopayService implements OnModuleDestroy {
         gatewayType: row.gatewayType,
         method: row.method,
         status: row.status,
+        providerStatus: row.providerStatus,
+        health: autopayHealth({
+          status: row.status,
+          providerStatus: row.providerStatus,
+          nextChargeAt: row.nextChargeAt,
+          now,
+        }),
         connectedAt: row.createdAt.toISOString(),
         nextChargeAt: row.nextChargeAt?.toISOString() ?? null,
         lastChargeAt: row.lastChargeAt?.toISOString() ?? null,
+        lastSyncedAt: row.lastSyncedAt?.toISOString() ?? null,
         expiresAt: row.subscriptionId === null
           ? null
           : (expiresById.get(row.subscriptionId)?.toISOString() ?? null),
@@ -248,10 +304,99 @@ export class AdminAutopayService implements OnModuleDestroy {
         amount: row.amount.toString(),
         currency: row.currency,
         planId: row.planId,
+        appliedChargeCount: row.appliedChargeCount,
+        plannedChargeCount: row.plannedChargeCount,
+        endsAt: row.endsAt?.toISOString() ?? null,
+        stalledSince: row.stalledSince?.toISOString() ?? null,
+        strandedReason: row.strandedReason,
+        strandedAt: row.strandedAt?.toISOString() ?? null,
+        cancelAttempts: row.cancelAttempts,
+        cancelNextTryAt: row.cancelNextTryAt?.toISOString() ?? null,
+        cancelLastError: row.cancelLastError,
+        manualCancelRequired: row.manualCancelRequired,
       };
     });
 
     return { items, total, take, skip };
+  }
+
+  /**
+   * Сводка вкладки: сколько строк в каждом статусе и сколько денег ждём в
+   * ближайшие 7 и 30 дней. Зависшие в сумму не попадают — по ним списания не
+   * будет, пока провайдер не сдвинет дату.
+   */
+  public async summarise(now: Date = new Date()): Promise<AdminAutopaySummaryInterface> {
+    const grouped = await this.prismaService.providerSubscription.groupBy({
+      by: ['status'],
+      _count: { _all: true },
+    });
+    const byStatus: Record<string, number> = {};
+    for (const row of grouped) byStatus[row.status] = row._count._all;
+
+    const in30Days = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+    const upcoming = await this.prismaService.providerSubscription.findMany({
+      where: {
+        status: { in: [ProviderSubscriptionStatus.ACTIVE, ProviderSubscriptionStatus.PAST_DUE] },
+        nextChargeAt: { gt: now, lte: in30Days },
+      },
+      select: { nextChargeAt: true, amount: true, currency: true, status: true, providerStatus: true },
+    });
+
+    const week = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+    const expected: Record<string, { in7d: number; in30d: number }> = {};
+    let stalled = 0;
+    for (const row of upcoming) {
+      if (
+        autopayHealth({
+          status: row.status,
+          providerStatus: row.providerStatus,
+          nextChargeAt: row.nextChargeAt,
+          now,
+        }) === 'STALLED'
+      ) {
+        stalled += 1;
+        continue;
+      }
+      const bucket = (expected[row.currency] ??= { in7d: 0, in30d: 0 });
+      const amount = Number(row.amount);
+      if (!Number.isFinite(amount)) continue;
+      bucket.in30d += amount;
+      if (row.nextChargeAt !== null && row.nextChargeAt.getTime() <= week.getTime()) bucket.in7d += amount;
+    }
+
+    const byHealth: Record<string, number> = { OK: 0, STALLED: 0, PAST_DUE: 0, DESYNC: 0 };
+    const live = await this.prismaService.providerSubscription.findMany({
+      where: {
+        status: {
+          in: [
+            ProviderSubscriptionStatus.ACTIVE,
+            ProviderSubscriptionStatus.PAST_DUE,
+            ProviderSubscriptionStatus.PENDING,
+          ],
+        },
+      },
+      select: { status: true, providerStatus: true, nextChargeAt: true },
+    });
+    for (const row of live) {
+      const health = autopayHealth({
+        status: row.status,
+        providerStatus: row.providerStatus,
+        nextChargeAt: row.nextChargeAt,
+        now,
+      });
+      byHealth[health] = (byHealth[health] ?? 0) + 1;
+    }
+
+    return {
+      byStatus,
+      byHealth,
+      stalled: byHealth['STALLED'] ?? 0,
+      expected: Object.entries(expected).map(([currency, value]) => ({
+        currency: currency as AdminAutopaySummaryInterface['expected'][number]['currency'],
+        in7d: value.in7d.toFixed(2),
+        in30d: value.in30d.toFixed(2),
+      })),
+    };
   }
 
   /**
@@ -575,4 +720,29 @@ export function describeOperatorYookassaDisable(
     );
   }
   return parts.length === 0 ? 'Автосписание через ЮKassa уже было выключено.' : parts.join(' ');
+}
+
+/**
+ * Статусы для запроса: явный список, одиночный статус или режим «все».
+ *
+ * По умолчанию — ACTIVE и PAST_DUE: это то, за чем следят. PENDING (клиент ещё
+ * не подтвердил) и завершённые прячутся за фильтром, иначе таблица тонет в
+ * истории и в неактивных подписках.
+ */
+function resolveStatuses(query: {
+  readonly status?: ProviderSubscriptionStatus;
+  readonly statuses?: string;
+  readonly includeEnded?: boolean;
+}): ProviderSubscriptionStatus[] {
+  const known = new Set<ProviderSubscriptionStatus>(Object.values(ProviderSubscriptionStatus));
+  const parsed = (query.statuses ?? '')
+    .split(',')
+    .map((value) => value.trim().toUpperCase())
+    .filter((value): value is ProviderSubscriptionStatus =>
+      known.has(value as ProviderSubscriptionStatus),
+    );
+  if (parsed.length > 0) return parsed;
+  if (query.status !== undefined) return [query.status];
+  if (query.includeEnded === true) return [...known];
+  return [ProviderSubscriptionStatus.ACTIVE, ProviderSubscriptionStatus.PAST_DUE];
 }

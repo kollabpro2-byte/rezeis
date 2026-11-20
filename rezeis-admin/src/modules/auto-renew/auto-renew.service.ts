@@ -23,6 +23,7 @@ import { readUserNotificationToggleMap } from '../notifications/utils/user-notif
 import { PaymentsRenewalCheckoutService } from '../payments/services/payments-renewal-checkout.service';
 import { SavedPaymentMethodService } from '../payments/services/saved-payment-method.service';
 import { shouldExtendForAutopay } from '../payments/utils/autopay-log.util';
+import { isStalledAutopay } from '../payments/utils/autopay-health.util';
 import { SubscriptionNoticePayloadService } from '../remnawave/services/subscription-notice-payload.service';
 import { SubscriptionRenewalService } from '../subscriptions/services/subscription-renewal.service';
 
@@ -307,7 +308,13 @@ export class AutoRenewService {
    */
   public async applyAutopayGrace(): Promise<number> {
     const now = new Date();
-    let rows: Array<{ id: string; subscriptionId: string | null; nextChargeAt: Date | null }>;
+    let rows: Array<{
+      id: string;
+      subscriptionId: string | null;
+      nextChargeAt: Date | null;
+      providerStatus: string | null;
+      status: ProviderSubscriptionStatus;
+    }>;
     try {
       rows = await this.prismaService.providerSubscription.findMany({
         where: {
@@ -315,7 +322,7 @@ export class AutoRenewService {
           subscriptionId: { not: null },
           nextChargeAt: { not: null, gt: now },
         },
-        select: { id: true, subscriptionId: true, nextChargeAt: true },
+        select: { id: true, subscriptionId: true, nextChargeAt: true, providerStatus: true, status: true },
         take: BATCH_SIZE,
       });
     } catch (error) {
@@ -335,6 +342,11 @@ export class AutoRenewService {
     for (const row of rows) {
       const subscriptionId = row.subscriptionId;
       if (subscriptionId === null) continue;
+      // Зависшую строку не продлеваем: провайдер не двигает её дату, и запас
+      // «+6 часов» превратился бы в бесконечное продление за счёт оператора.
+      if (isStalledAutopay({ status: row.status, providerStatus: row.providerStatus, nextChargeAt: row.nextChargeAt, now })) {
+        continue;
+      }
       const expiresAt = expiresById.get(subscriptionId) ?? null;
       const deadline = shouldExtendForAutopay({ expiresAt, nextChargeAt: row.nextChargeAt, now });
       if (deadline === null) continue;

@@ -11,6 +11,17 @@ import { getErrorMessage } from '@/lib/http-errors'
 import { activeLocale } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -37,9 +48,14 @@ interface AutopayRow {
   readonly gatewayType: string
   readonly method: string | null
   readonly status: string
+  /** Слово провайдера: ACTIVE, PROCESSING, ACTIVE_FAILED, CANCEL, … */
+  readonly providerStatus: string | null
+  /** OK / STALLED / PAST_DUE / DESYNC — то, что видит оператор. */
+  readonly health: string
   readonly connectedAt: string
   readonly nextChargeAt: string | null
   readonly lastChargeAt: string | null
+  readonly lastSyncedAt: string | null
   readonly expiresAt: string | null
   readonly attempts: {
     readonly succeeded: number
@@ -51,6 +67,24 @@ interface AutopayRow {
   readonly amount: string
   readonly currency: string
   readonly planId: string
+  readonly appliedChargeCount: number
+  readonly plannedChargeCount: number | null
+  readonly endsAt: string | null
+  readonly stalledSince: string | null
+  readonly strandedReason: string | null
+  readonly strandedAt: string | null
+  readonly cancelAttempts: number
+  readonly cancelNextTryAt: string | null
+  readonly cancelLastError: string | null
+  readonly manualCancelRequired: boolean
+}
+
+/** Сводка вкладки: `AdminAutopaySummaryInterface`. */
+interface AutopaySummary {
+  readonly byStatus: Readonly<Record<string, number>>
+  readonly byHealth: Readonly<Record<string, number>>
+  readonly stalled: number
+  readonly expected: ReadonlyArray<{ readonly currency: string; readonly in7d: string; readonly in30d: string }>
 }
 
 interface AutopayList {
@@ -67,6 +101,10 @@ const STATUS_VARIANT: Record<string, 'default' | 'secondary' | 'destructive' | '
   CANCELLED: 'secondary',
   FAILED: 'destructive',
 }
+
+/** Живые по умолчанию: за ними и следят. Остальное — по переключателю. */
+const LIVE_STATUSES = 'ACTIVE,PAST_DUE'
+const ALL_STATUSES = 'ACTIVE,PAST_DUE,PENDING,CANCELLED,FAILED'
 
 const PAGE_SIZE = 50
 
@@ -105,7 +143,9 @@ export default function AutopayPage() {
   const queryParams = useMemo(() => {
     const params = new URLSearchParams({ take: String(PAGE_SIZE), skip: String(page * PAGE_SIZE) })
     if (search.trim().length > 0) params.set('search', search.trim())
-    if (!includeEnded) params.set('status', 'ACTIVE')
+    // По умолчанию — живые: ACTIVE и PAST_DUE. Переключатель добавляет
+    // завершённые и несостоявшиеся (CANCELLED/FAILED) и ещё не подтверждённые.
+    params.set('statuses', includeEnded ? ALL_STATUSES : LIVE_STATUSES)
     return params.toString()
   }, [search, includeEnded, page])
 
@@ -114,6 +154,12 @@ export default function AutopayPage() {
     queryFn: async ({ signal }) =>
       (await api.get<AutopayList>(`/admin/payments/autopay?${queryParams}`, { signal })).data,
     placeholderData: keepPreviousData,
+  })
+
+  const { data: summary } = useQuery<AutopaySummary>({
+    queryKey: adminQueryKeys.subscriptions.autopay('summary'),
+    queryFn: async ({ signal }) =>
+      (await api.get<AutopaySummary>('/admin/payments/autopay/summary', { signal })).data,
   })
 
   const cancel = useMutation({
@@ -172,6 +218,32 @@ export default function AutopayPage() {
         <div className="text-sm text-muted-foreground">{t('autopayPage.total', { count: total })}</div>
       </div>
 
+      {summary && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          {[
+            { label: t('autopayPage.summary.active'), value: String(summary.byStatus['ACTIVE'] ?? 0) },
+            { label: t('autopayPage.summary.pastDue'), value: String(summary.byStatus['PAST_DUE'] ?? 0) },
+            { label: t('autopayPage.summary.stalled'), value: String(summary.stalled) },
+            {
+              label: t('autopayPage.summary.expected'),
+              value:
+                summary.expected.length === 0
+                  ? '—'
+                  : summary.expected
+                      .map((row) => `${row.in7d} ${row.currency} / ${row.in30d}`)
+                      .join(', '),
+            },
+          ].map((tile) => (
+            <Card key={tile.label}>
+              <CardContent className="pt-4 pb-3">
+                <p className="text-xl font-bold tabular-nums">{tile.value}</p>
+                <p className="text-xs text-muted-foreground">{tile.label}</p>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
+
       <Card>
         <CardContent className="p-0">
           {isLoading ? (
@@ -215,6 +287,20 @@ export default function AutopayPage() {
                         )}
                         {row.login !== null && row.email !== null && (
                           <span className="text-xs text-muted-foreground">{row.email}</span>
+                        )}
+                        {row.strandedReason !== null && (
+                          <span className="text-xs text-amber-600">
+                            {t('autopayPage.stranded', { reason: row.strandedReason })}
+                          </span>
+                        )}
+                        {row.manualCancelRequired && (
+                          <span className="text-xs text-destructive">{t('autopayPage.manualCancel')}</span>
+                        )}
+                        {row.cancelLastError !== null && (
+                          <span className="text-xs text-destructive">
+                            {t('autopayPage.cancelFailedTimes', { count: row.cancelAttempts })}:{' '}
+                            {row.cancelLastError}
+                          </span>
                         )}
                       </div>
                     </TableCell>
@@ -268,20 +354,56 @@ export default function AutopayPage() {
                         )}
                     </TableCell>
                     <TableCell>
-                      <Badge variant={STATUS_VARIANT[row.status] ?? 'outline'}>
-                        {String(t(`autopayPage.statuses.${row.status}`, row.status))}
-                      </Badge>
+                      <div className="flex flex-col gap-1">
+                        <Badge variant={STATUS_VARIANT[row.status] ?? 'outline'}>
+                          {String(t(`autopayPage.statuses.${row.status}`, row.status))}
+                        </Badge>
+                        {row.health !== 'OK' && (
+                          <Badge variant={row.health === 'STALLED' ? 'destructive' : 'secondary'}>
+                            {String(t(`autopayPage.health.${row.health}`, row.health))}
+                          </Badge>
+                        )}
+                        {row.providerStatus !== null && (
+                          <span className="text-xs text-muted-foreground">{row.providerStatus}</span>
+                        )}
+                        {row.lastSyncedAt !== null && (
+                          <span className="text-xs text-muted-foreground">
+                            {t('autopayPage.syncedAt', { at: formatDateTime(row.lastSyncedAt) })}
+                          </span>
+                        )}
+                      </div>
                     </TableCell>
                     <TableCell className="text-right">
                       <PermissionGate resource="payments" action="edit">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          disabled={!canEdit || cancel.isPending || row.status === 'CANCELLED'}
-                          onClick={() => cancel.mutate(row)}
-                        >
-                          {t('autopayPage.cancel')}
-                        </Button>
+                        <AlertDialog>
+                          <AlertDialogTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              disabled={!canEdit || cancel.isPending || row.status === 'CANCELLED'}
+                            >
+                              {t('autopayPage.cancel')}
+                            </Button>
+                          </AlertDialogTrigger>
+                          <AlertDialogContent>
+                            <AlertDialogHeader>
+                              <AlertDialogTitle>{t('autopayPage.confirmTitle')}</AlertDialogTitle>
+                              <AlertDialogDescription>
+                                {t('autopayPage.confirmBody', {
+                                  login: row.login ?? row.email ?? row.telegramId ?? row.userId ?? '—',
+                                  gateway: row.method === null ? row.gatewayType : `${row.gatewayType} · ${row.method}`,
+                                  date: formatDateTime(row.nextChargeAt),
+                                })}
+                              </AlertDialogDescription>
+                            </AlertDialogHeader>
+                            <AlertDialogFooter>
+                              <AlertDialogCancel>{t('autopayPage.confirmKeep')}</AlertDialogCancel>
+                              <AlertDialogAction onClick={() => cancel.mutate(row)}>
+                                {t('autopayPage.confirmCancel')}
+                              </AlertDialogAction>
+                            </AlertDialogFooter>
+                          </AlertDialogContent>
+                        </AlertDialog>
                       </PermissionGate>
                     </TableCell>
                   </TableRow>

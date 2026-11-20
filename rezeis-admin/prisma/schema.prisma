@@ -2761,6 +2761,19 @@ model ProviderSubscription {
   /// который видит панель: успешное списание становится продлением, неуспешное
   /// приходит словом провайдера. Обрезается до AUTOPAY_ATTEMPTS_CAP.
   attempts               Json                       @default("[]") @map("attempts")
+  /// Когда строка впервые признана зависшей (`PROCESSING`/`ACTIVE_FAILED`
+  /// с датой списания в прошлом). Считается [autopayHealth] на лету; поле
+  /// хранит начало «зависания», чтобы таблица не пересчитывала его каждый раз.
+  stalledSince           DateTime?                  @map("stalled_since") @db.Timestamptz(3)
+  /// Почему строка лишняя: заменена новой автоподпиской или продлена вручную.
+  strandedReason         String?                    @map("stranded_reason")
+  strandedAt             DateTime?                  @map("stranded_at") @db.Timestamptz(3)
+  /// Попытки отменить у провайдера: счётчик, момент следующей и последняя ошибка.
+  cancelAttempts         Int                        @default(0) @map("cancel_attempts")
+  cancelNextTryAt        DateTime?                  @map("cancel_next_try_at") @db.Timestamptz(3)
+  cancelLastError        String?                    @map("cancel_last_error")
+  /// Провайдер не отменяет сам (`PROCESSING`) — оператору отменить в ЛК Antilopay.
+  manualCancelRequired   Boolean                    @default(false) @map("manual_cancel_required")
   createdAt              DateTime                   @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt              DateTime                   @updatedAt @map("updated_at") @db.Timestamptz(3)
 

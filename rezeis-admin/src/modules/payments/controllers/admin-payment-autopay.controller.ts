@@ -11,6 +11,7 @@ import { RbacGuard } from '../../rbac/guards/rbac.guard';
 import {
   AdminAutopayListInterface,
   AdminAutopayService,
+  AdminAutopaySummaryInterface,
   AdminProviderAutopayCancelResultInterface,
   AdminUserAutopayInterface,
   AdminYookassaAutopayDisableResultInterface,
@@ -42,6 +43,17 @@ export class AdminPaymentAutopayController {
   @RequirePermission('payments', 'view')
   public async list(@Query() query: AdminAutopayListQueryDto): Promise<AdminAutopayListInterface> {
     return this.adminAutopayService.listAll(query);
+  }
+
+  /**
+   * Сводка вкладки: строки по статусам, по здоровью и ожидаемые списания на
+   * 7 и 30 дней. Отдельный запрос — таблица листается, сводка нет.
+   */
+  @Get('summary')
+  @ApiOperation({ summary: 'Сводка автосписаний: статусы, здоровье, ожидаемые суммы' })
+  @RequirePermission('payments', 'view')
+  public async summary(): Promise<AdminAutopaySummaryInterface> {
+    return this.adminAutopayService.summarise();
   }
 
   /**

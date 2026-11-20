@@ -802,12 +802,18 @@ export class ProviderSubscriptionService {
     });
     // Провайдер сказал «не смог списать»: пишем попытку, чтобы оператор видел
     // и её дату, и слово провайдера (в транзакциях её нет — денег не было).
+    // Пишем и когда строка УЖЕ PAST_DUE, если провайдер прислал новую дату
+    // списания или новую ошибку: иначе повторная неудача не попадала в историю
+    // вообще. Ключ дедупликации — дата списания и результат (`appendAutopayAttempt`).
+    const providerMoved =
+      current.providerStatus !== state.providerStatus ||
+      (current.nextChargeAt?.getTime() ?? 0) !== (state.nextChargeAt?.getTime() ?? 0);
     if (
       status === ProviderSubscriptionStatus.PAST_DUE &&
-      current.status !== ProviderSubscriptionStatus.PAST_DUE
+      (current.status !== ProviderSubscriptionStatus.PAST_DUE || providerMoved)
     ) {
       await this.recordAttempt(row.id, {
-        at: new Date().toISOString(),
+        at: (state.nextChargeAt ?? new Date()).toISOString(),
         ok: false,
         error: state.providerStatus ?? 'PAST_DUE',
       });
