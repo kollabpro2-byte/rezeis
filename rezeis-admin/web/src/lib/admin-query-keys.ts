@@ -73,6 +73,8 @@ export const adminQueryKeys = {
     list: (filters: { readonly statusFilter: string; readonly trialOnly: boolean }) =>
       ['admin', 'subscriptions', 'list', filters] as const,
     stats: ['admin', 'subscriptions', 'stats'] as const,
+    /** Таблица «Автосписания»: её фильтры — отдельная ветка ключа. */
+    autopay: (params: string) => ['admin', 'subscriptions', 'autopay', params] as const,
   },
   users: {
     all: ['admin', 'users'] as const,

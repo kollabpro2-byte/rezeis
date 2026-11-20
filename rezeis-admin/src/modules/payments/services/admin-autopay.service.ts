@@ -1,5 +1,5 @@
 import { Injectable, Logger, NotFoundException, OnModuleDestroy } from '@nestjs/common';
-import { PaymentGatewayType, ProviderSubscription } from '@prisma/client';
+import { PaymentGatewayType, ProviderSubscription, ProviderSubscriptionStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
@@ -7,6 +7,12 @@ import { buildAdminAuditLogData } from '../../../common/utils/admin-audit-log.ut
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
 import { RequestMetadataInterface } from '../../auth/interfaces/request-metadata.interface';
 import { type AutopayRefundOutcome, UNKNOWN_AUTOPAY_GATEWAY } from '../utils/refund-autopay.util';
+import {
+  type AutopayAttempt,
+  type AutopayAttemptSummary,
+  readAutopayAttempts,
+  summariseAutopayAttempts,
+} from '../utils/autopay-log.util';
 import { AFTER_RESPONSE_SHUTDOWN_WAIT_MS } from './payment-reconciliation.service';
 import { OperatorProviderSubscriptionInterface, ProviderSubscriptionService } from './provider-subscription.service';
 import { SavedPaymentMethodService, SwitchedOffMethod } from './saved-payment-method.service';
@@ -45,6 +51,45 @@ export interface AdminYookassaAutopayDisableResultInterface {
   /** Held by a charge being submitted: switched off after the answer, when that charge ends. */
   readonly pending: number;
 }
+
+/** One row of the panel's «Автосписания» table. */
+export interface AdminAutopayRowInterface {
+  readonly providerSubscriptionRowId: string;
+  readonly userId: string | null;
+  /** Логин клиента: username, им оперирует поддержка. */
+  readonly login: string | null;
+  readonly email: string | null;
+  readonly telegramId: string | null;
+  readonly gatewayType: PaymentGatewayType;
+  /** CARD или SBP (Antilopay различает); null у шлюзов без выбора метода. */
+  readonly method: string | null;
+  readonly status: ProviderSubscriptionStatus;
+  /** Когда автосписание подключено (подписка подписана). */
+  readonly connectedAt: string;
+  /** Когда провайдер спишет в следующий раз. */
+  readonly nextChargeAt: string | null;
+  readonly lastChargeAt: string | null;
+  /** Когда кончается VPN-подписка, которую эти списания продлевают. */
+  readonly expiresAt: string | null;
+  /** Сколько успешных и неуспешных попыток было, и даты последних. */
+  readonly attempts: AutopayAttemptSummary;
+  /** Последние попытки, новее в конце: дата и время видны оператору. */
+  readonly history: readonly AutopayAttempt[];
+  readonly amount: string;
+  readonly currency: string;
+  readonly planId: string;
+}
+
+/** Ответ таблицы: страница и общее число строк под фильтром. */
+export interface AdminAutopayListInterface {
+  readonly items: readonly AdminAutopayRowInterface[];
+  readonly total: number;
+  readonly take: number;
+  readonly skip: number;
+}
+
+/** Сколько последних попыток показываем в строке таблицы. */
+const HISTORY_IN_ROW = 10;
 
 /**
  * The operator's «Отменить автосписание» on the user's card in the panel,
@@ -97,6 +142,140 @@ export class AdminAutopayService implements OnModuleDestroy {
           autopayEnabled: method.autopayEnabled,
         })),
     };
+  }
+
+  /**
+   * Таблица «Автосписания»: живые автосписания всех клиентов, с историей
+   * попыток. Один запрос страницы и один счётчик под теми же фильтрами.
+   *
+   * По умолчанию показываем живые: `PENDING` (клиент ещё не подтвердил),
+   * `ACTIVE` и `PAST_DUE` (провайдер не смог списать и повторит). Отменённые и
+   * несостоявшиеся — по явному фильтру, иначе таблица заполнится мусором.
+   */
+  public async listAll(query: {
+    readonly search?: string;
+    readonly status?: ProviderSubscriptionStatus;
+    readonly take?: number;
+    readonly skip?: number;
+  }): Promise<AdminAutopayListInterface> {
+    const take = Math.min(Math.max(query.take ?? 50, 1), 200);
+    const skip = Math.max(query.skip ?? 0, 0);
+    const statuses = query.status === undefined
+      ? [
+          ProviderSubscriptionStatus.ACTIVE,
+          ProviderSubscriptionStatus.PAST_DUE,
+          ProviderSubscriptionStatus.PENDING,
+        ]
+      : [query.status];
+    const search = query.search?.trim();
+
+    const where = {
+      status: { in: statuses },
+      ...(search === undefined || search.length === 0
+        ? {}
+        : {
+            user: {
+              is: {
+                OR: [
+                  { username: { contains: search, mode: 'insensitive' as const } },
+                  { email: { contains: search, mode: 'insensitive' as const } },
+                  { name: { contains: search, mode: 'insensitive' as const } },
+                ],
+              },
+            },
+          }),
+    };
+
+    const [total, rows] = await this.prismaService.$transaction([
+      this.prismaService.providerSubscription.count({ where }),
+      this.prismaService.providerSubscription.findMany({
+        where,
+        orderBy: [{ nextChargeAt: 'asc' }, { createdAt: 'desc' }],
+        take,
+        skip,
+        select: {
+          id: true,
+          userId: true,
+          gatewayType: true,
+          method: true,
+          status: true,
+          createdAt: true,
+          nextChargeAt: true,
+          lastChargeAt: true,
+          amount: true,
+          currency: true,
+          planId: true,
+          attempts: true,
+          subscriptionId: true,
+          user: { select: { username: true, email: true, telegramId: true } },
+        },
+      }),
+    ]);
+
+    // VPN-подписка — отдельной выборкой: прямой связи в схеме нет, только id.
+    const subscriptionIds = rows
+      .map((row) => row.subscriptionId)
+      .filter((id): id is string => id !== null);
+    const subscriptions = subscriptionIds.length === 0
+      ? []
+      : await this.prismaService.subscription.findMany({
+          where: { id: { in: subscriptionIds } },
+          select: { id: true, expiresAt: true },
+        });
+    const expiresById = new Map(subscriptions.map((sub) => [sub.id, sub.expiresAt] as const));
+
+    const items = rows.map((row): AdminAutopayRowInterface => {
+      const history = readAutopayAttempts(row.attempts);
+      return {
+        providerSubscriptionRowId: row.id,
+        userId: row.userId,
+        login: row.user?.username ?? null,
+        email: row.user?.email ?? null,
+        telegramId: row.user?.telegramId === null || row.user?.telegramId === undefined
+          ? null
+          : row.user.telegramId.toString(),
+        gatewayType: row.gatewayType,
+        method: row.method,
+        status: row.status,
+        connectedAt: row.createdAt.toISOString(),
+        nextChargeAt: row.nextChargeAt?.toISOString() ?? null,
+        lastChargeAt: row.lastChargeAt?.toISOString() ?? null,
+        expiresAt: row.subscriptionId === null
+          ? null
+          : (expiresById.get(row.subscriptionId)?.toISOString() ?? null),
+        attempts: summariseAutopayAttempts(row.attempts),
+        history: history.slice(Math.max(0, history.length - HISTORY_IN_ROW)),
+        amount: row.amount.toString(),
+        currency: row.currency,
+        planId: row.planId,
+      };
+    });
+
+    return { items, total, take, skip };
+  }
+
+  /**
+   * «Отменить автосписание» из таблицы: строку ищем по её id, владельца берём
+   * из неё же — оператору не нужно знать userId.
+   */
+  public async cancelById(input: {
+    readonly providerSubscriptionRowId: string;
+    readonly currentAdmin: CurrentAdminInterface;
+    readonly requestMetadata: RequestMetadataInterface;
+  }): Promise<AdminProviderAutopayCancelResultInterface> {
+    const row = await this.prismaService.providerSubscription.findUnique({
+      where: { id: input.providerSubscriptionRowId },
+      select: { id: true, userId: true },
+    });
+    if (row === null || row.userId === null) {
+      throw new NotFoundException('Autopay subscription not found');
+    }
+    return this.cancelProviderSubscription({
+      userId: row.userId,
+      providerSubscriptionRowId: row.id,
+      currentAdmin: input.currentAdmin,
+      requestMetadata: input.requestMetadata,
+    });
   }
 
   /**

@@ -43,6 +43,8 @@ function RouteErrorBoundary({ children }: { readonly children: React.ReactNode }
 const AdminShell = adminShell.Component;
 const SignInPage = lazy(() => import('@/features/auth/sign-in-page'));
 const ForcePasswordChangePage = lazy(() => import('@/features/auth/force-password-change-page'));
+const AutopayPage = lazy(() => import('@/features/subscriptions/autopay-page'));
+
 const DashboardPage = lazy(
   withFeatureBundle('dashboard', () => import('@/features/dashboard/dashboard-page')),
 );
@@ -209,6 +211,7 @@ export const routes: RouteObject[] = [
           { path: 'plans', element: withSuspense(<PlansPage />) },
           { path: 'add-ons', element: withSuspense(<AddOnsPage />) },
           { path: 'subscriptions', element: withSuspense(<SubscriptionsPage />) },
+          { path: 'subscriptions/autopay', element: withSuspense(<AutopayPage />) },
           { path: 'payments', element: withSuspense(<PaymentsPage />) },
           { path: 'promocodes', element: withSuspense(<PromocodesPage />) },
           { path: 'referrals', element: withSuspense(<ReferralsPage />) },

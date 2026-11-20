@@ -104,6 +104,7 @@ function world(options: WorldOptions = {}) {
     delayDays: 7,
     delayGrantedAt: null,
     consentVersion: 'provider-subscription-v1',
+    attempts: [],
     createdAt: new Date(),
     updatedAt: new Date(),
     ...options.row,

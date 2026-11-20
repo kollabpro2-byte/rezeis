@@ -1,4 +1,5 @@
-import { Controller, Get, HttpCode, HttpStatus, Param, Post, Req, UseGuards } from '@nestjs/common';
+import { Controller, Get, HttpCode, HttpStatus, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Request } from 'express';
 
 import { CurrentAdmin } from '../../auth/decorators/current-admin.decorator';
@@ -8,11 +9,13 @@ import { extractRequestMetadata } from '../../auth/utils/request-metadata.util';
 import { RequirePermission } from '../../rbac/decorators/require-permission.decorator';
 import { RbacGuard } from '../../rbac/guards/rbac.guard';
 import {
+  AdminAutopayListInterface,
   AdminAutopayService,
   AdminProviderAutopayCancelResultInterface,
   AdminUserAutopayInterface,
   AdminYookassaAutopayDisableResultInterface,
 } from '../services/admin-autopay.service';
+import { AdminAutopayListQueryDto } from '../dto/admin-autopay-list-query.dto';
 
 /**
  * A customer's autopays on the user's card in the panel: what they are, and
@@ -27,6 +30,39 @@ import {
 @UseGuards(AdminJwtAuthGuard, RbacGuard)
 export class AdminPaymentAutopayController {
   public constructor(private readonly adminAutopayService: AdminAutopayService) {}
+
+  /**
+   * Таблица «Автосписания»: все живые автосписания клиентов.
+   *
+   * `payments:view` — то же право, которым читается карточка клиента: это те же
+   * данные, только списком.
+   */
+  @Get()
+  @ApiOperation({ summary: 'Автосписания клиентов: логин, дата подключения, попытки, следующее списание' })
+  @RequirePermission('payments', 'view')
+  public async list(@Query() query: AdminAutopayListQueryDto): Promise<AdminAutopayListInterface> {
+    return this.adminAutopayService.listAll(query);
+  }
+
+  /**
+   * «Отменить автосписание» из таблицы. Владельца берём из строки, чтобы
+   * оператору не нужно было открывать карточку клиента.
+   */
+  @Post(':providerSubscriptionRowId/cancel')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Отменить автосписание по строке таблицы' })
+  @RequirePermission('payments', 'edit')
+  public async cancelById(
+    @Param('providerSubscriptionRowId') providerSubscriptionRowId: string,
+    @CurrentAdmin() currentAdmin: CurrentAdminInterface,
+    @Req() request: Request,
+  ): Promise<AdminProviderAutopayCancelResultInterface> {
+    return this.adminAutopayService.cancelById({
+      providerSubscriptionRowId,
+      currentAdmin,
+      requestMetadata: extractRequestMetadata(request),
+    });
+  }
 
   @Get('users/:userId')
   @RequirePermission('payments', 'view')

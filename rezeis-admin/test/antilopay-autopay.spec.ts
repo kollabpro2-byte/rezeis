@@ -943,6 +943,7 @@ function harness(initial: Partial<ProviderSubscription> = {}) {
     delayDays: null,
     delayGrantedAt: null,
     consentVersion: 'provider-subscription-v1',
+    attempts: [],
     createdAt: new Date(),
     updatedAt: new Date(),
     ...initial,

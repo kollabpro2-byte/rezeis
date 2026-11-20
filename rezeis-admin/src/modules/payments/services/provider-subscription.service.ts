@@ -47,6 +47,7 @@ import {
   postAntilopay,
 } from '../utils/antilopay-api.util';
 import { antilopayRefundEnvelope, completedAntilopayRefunds } from '../utils/antilopay-refund.util';
+import { appendAutopayAttempt, type AutopayAttempt } from '../utils/autopay-log.util';
 import {
   AURAPAY_API,
   aurapayHeaders,
@@ -760,6 +761,10 @@ export class ProviderSubscriptionService {
           break;
         }
         applied = chargeNumber;
+        await this.recordAttempt(row.id, {
+          at: (state.lastChargeAt ?? new Date()).toISOString(),
+          ok: true,
+        });
       }
     }
 
@@ -795,6 +800,18 @@ export class ProviderSubscriptionService {
         ...(providerCancelled ? { cancelledAt: new Date() } : {}),
       },
     });
+    // Провайдер сказал «не смог списать»: пишем попытку, чтобы оператор видел
+    // и её дату, и слово провайдера (в транзакциях её нет — денег не было).
+    if (
+      status === ProviderSubscriptionStatus.PAST_DUE &&
+      current.status !== ProviderSubscriptionStatus.PAST_DUE
+    ) {
+      await this.recordAttempt(row.id, {
+        at: new Date().toISOString(),
+        ok: false,
+        error: state.providerStatus ?? 'PAST_DUE',
+      });
+    }
     if (providerCancelled) {
       // Cancelled without the panel asking — the payer used the link in the
       // provider's email — and the provider does not say who. Or a refund's
@@ -938,6 +955,33 @@ export class ProviderSubscriptionService {
    *
    * Returns the subscription the charges renew, once the first has made one.
    */
+  /**
+   * Дописывает попытку автосписания в историю подписки.
+   *
+   * Пишется только результат, который видит панель: успех (деньги списаны и
+   * продление выдано) или неуспех со словом провайдера. Падение записи не
+   * должно ломать синхронизацию — деньги и доступ важнее журнала.
+   */
+  private async recordAttempt(rowId: string, entry: AutopayAttempt): Promise<void> {
+    try {
+      await this.prismaService.$transaction(async (tx) => {
+        const row = await tx.providerSubscription.findUnique({
+          where: { id: rowId },
+          select: { attempts: true },
+        });
+        if (row === null) return;
+        await tx.providerSubscription.update({
+          where: { id: rowId },
+          data: { attempts: appendAutopayAttempt(row.attempts, entry) as unknown as Prisma.InputJsonValue },
+        });
+      });
+    } catch (error) {
+      this.logger.warn(
+        `Failed to record an autopay attempt for subscription ${rowId}: ${(error as Error).message}`,
+      );
+    }
+  }
+
   private async applyKeyedCharges(
     row: ProviderSubscription,
     charges: readonly AntilopayCharge[],
@@ -1029,6 +1073,11 @@ export class ProviderSubscriptionService {
           data: { appliedChargeCount: chargeNumber },
         });
         applied = chargeNumber;
+        await this.recordAttempt(row.id, {
+          at: (charge.at ?? new Date()).toISOString(),
+          ok: true,
+          ...(charge.amount === null ? {} : { amount: charge.amount }),
+        });
       }
       // A refund made at Antilopay after the day of the charge is listed beside
       // it (a scheduled charge's is in the recurrent's `payments[]`, and the

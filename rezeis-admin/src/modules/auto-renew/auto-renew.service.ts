@@ -1,5 +1,6 @@
 import { HttpException, Injectable, Logger } from '@nestjs/common';
 import {
+  ProviderSubscriptionStatus,
   PurchaseChannel,
   PurchaseType,
   SubscriptionStatus,
@@ -21,6 +22,7 @@ import {
 import { readUserNotificationToggleMap } from '../notifications/utils/user-notification-toggle-map.reader';
 import { PaymentsRenewalCheckoutService } from '../payments/services/payments-renewal-checkout.service';
 import { SavedPaymentMethodService } from '../payments/services/saved-payment-method.service';
+import { shouldExtendForAutopay } from '../payments/utils/autopay-log.util';
 import { SubscriptionNoticePayloadService } from '../remnawave/services/subscription-notice-payload.service';
 import { SubscriptionRenewalService } from '../subscriptions/services/subscription-renewal.service';
 
@@ -290,6 +292,71 @@ export class AutoRenewService {
    * refused before any payment existed; a still-pending charge is allowed to
    * settle).
    */
+  /**
+   * Продлевает подписку, если она кончается РАНЬШЕ автосписания.
+   *
+   * Провайдер списывает по своему расписанию, и оно не обязано совпадать с
+   * `expiresAt`: подписка может кончиться за пару часов до списания, клиент
+   * теряет доступ, а продление приходит после. Поэтому перед истечением
+   * смотрим на живые подписки провайдера и, если разрыв небольшой (до суток),
+   * отодвигаем `expiresAt` до «момент списания + 6 часов».
+   *
+   * Операция идемпотентна: после продления `expiresAt` становится больше
+   * `nextChargeAt`, условие перестаёт выполняться, и следующий тик ничего не
+   * трогает — продлеваем ровно один раз на период.
+   */
+  public async applyAutopayGrace(): Promise<number> {
+    const now = new Date();
+    let rows: Array<{ id: string; subscriptionId: string | null; nextChargeAt: Date | null }>;
+    try {
+      rows = await this.prismaService.providerSubscription.findMany({
+        where: {
+          status: { in: [ProviderSubscriptionStatus.ACTIVE, ProviderSubscriptionStatus.PAST_DUE] },
+          subscriptionId: { not: null },
+          nextChargeAt: { not: null, gt: now },
+        },
+        select: { id: true, subscriptionId: true, nextChargeAt: true },
+        take: BATCH_SIZE,
+      });
+    } catch (error) {
+      this.logger.warn(`Autopay grace skipped: ${(error as Error).message}`);
+      return 0;
+    }
+    const ids = rows.map((row) => row.subscriptionId).filter((id): id is string => id !== null);
+    if (ids.length === 0) return 0;
+
+    const subscriptions = await this.prismaService.subscription.findMany({
+      where: { id: { in: ids }, status: SubscriptionStatus.ACTIVE },
+      select: { id: true, expiresAt: true },
+    });
+    const expiresById = new Map(subscriptions.map((sub) => [sub.id, sub.expiresAt] as const));
+
+    let extended = 0;
+    for (const row of rows) {
+      const subscriptionId = row.subscriptionId;
+      if (subscriptionId === null) continue;
+      const expiresAt = expiresById.get(subscriptionId) ?? null;
+      const deadline = shouldExtendForAutopay({ expiresAt, nextChargeAt: row.nextChargeAt, now });
+      if (deadline === null) continue;
+      try {
+        await this.prismaService.subscription.update({
+          where: { id: subscriptionId },
+          data: { expiresAt: deadline },
+        });
+        extended += 1;
+        this.logger.log(
+          `Subscription ${subscriptionId} extended to ${deadline.toISOString()} ` +
+            `so the autopay of ${row.id} can land`,
+        );
+      } catch (error) {
+        this.logger.warn(
+          `Failed to extend subscription ${subscriptionId} for its autopay: ${(error as Error).message}`,
+        );
+      }
+    }
+    return extended;
+  }
+
   public async markExpiredSubscriptions(): Promise<number> {
     const now = new Date();
     const expired = await this.prismaService.subscription.findMany({
@@ -845,6 +912,13 @@ export class AutoRenewService {
     readonly autopaySkipped: number;
   }> {
     const autopay = await this.processAutopayCharges();
+    // Перед тем как что-то истекать: если подписка кончается раньше, чем
+    // провайдер спишет, продлеваем её до «списание + 6 часов». Иначе клиент
+    // теряет доступ за пару часов до автосписания и не понимает почему.
+    const graceExtended = await this.applyAutopayGrace();
+    if (graceExtended > 0) {
+      this.logger.log(`Autopay grace extended ${graceExtended} subscription(s)`);
+    }
     const expired = await this.markExpiredSubscriptions();
     // EACH FAMILY IS ISOLATED, and that is not defensive dressing — it is the
     // difference between one customer's notice failing and five families going

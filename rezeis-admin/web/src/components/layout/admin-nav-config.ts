@@ -10,6 +10,7 @@ import {
   Users,
   Package,
   CreditCard,
+  CalendarClock,
   DollarSign,
   Tag,
   Zap,
@@ -118,6 +119,15 @@ export const navGroups: ReadonlyArray<NavGroup> = [
         ],
       },
       { key: 'subscriptions', path: '/subscriptions', icon: CreditCard },
+      {
+        // Подпункт «Подписки»: автосписания провайдеров. Читает
+        // `admin/payments/autopay` за `payments:view` — тем же правом, которым
+        // открывается карточка клиента с теми же данными.
+        key: 'autopay',
+        path: '/subscriptions/autopay',
+        icon: CalendarClock,
+        requiredPermission: { resource: 'payments', action: 'view' },
+      },
       {
         key: 'payments',
         path: '/payments',

@@ -2757,6 +2757,10 @@ model ProviderSubscription {
   /// a customer who has used the delay: it is given once per customer.
   delayGrantedAt         DateTime?                  @map("delay_granted_at") @db.Timestamptz(3)
   consentVersion         String                     @map("consent_version")
+  /// Попытки автосписания, `{ at, ok, amount?, error? }[]` — только результат,
+  /// который видит панель: успешное списание становится продлением, неуспешное
+  /// приходит словом провайдера. Обрезается до AUTOPAY_ATTEMPTS_CAP.
+  attempts               Json                       @default("[]") @map("attempts")
   createdAt              DateTime                   @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt              DateTime                   @updatedAt @map("updated_at") @db.Timestamptz(3)
 
