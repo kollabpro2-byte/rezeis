@@ -13,7 +13,7 @@ import {
   readAutopayAttempts,
   summariseAutopayAttempts,
 } from '../utils/autopay-log.util';
-import { type AutopayHealth, autopayHealth } from '../utils/autopay-health.util';
+import { type AutopayHealth, autopayHealth, STALLED_AFTER_MS } from '../utils/autopay-health.util';
 import { AFTER_RESPONSE_SHUTDOWN_WAIT_MS } from './payment-reconciliation.service';
 import { OperatorProviderSubscriptionInterface, ProviderSubscriptionService } from './provider-subscription.service';
 import { SavedPaymentMethodService, SwitchedOffMethod } from './saved-payment-method.service';
@@ -101,6 +101,22 @@ export interface AdminAutopayRowInterface {
   readonly cancelLastError: string | null;
   /** Провайдер не отменяет сам — оператору нужно сделать это в ЛК Antilopay. */
   readonly manualCancelRequired: boolean;
+  /** `recurrent_id` Antilopay: по нему строку ищут в личном кабинете. */
+  readonly providerRecurrentId: string | null;
+  /** Другие живые строки той же подписки — «дубль» в таблице. */
+  readonly duplicateRowIds: readonly string[];
+  /** Чем продлена подписка в последний раз: автосписание или ручная оплата. */
+  readonly lastRenewal: {
+    readonly transactionId: string;
+    readonly at: string;
+    readonly gatewayType: PaymentGatewayType;
+    readonly purchaseType: string;
+    /** true — продлил сам рекуррент, false — клиент заплатил вручную. */
+    readonly isAutopay: boolean;
+  } | null;
+  /** Скрыта ежедневной уборкой (видна только в аудите). */
+  readonly hiddenAt: string | null;
+  readonly hiddenReason: string | null;
 }
 
 /** Сводка вкладки: статусы, здоровье и ожидаемые списания. */
@@ -125,6 +141,21 @@ export interface AdminAutopayListInterface {
 
 /** Сколько последних попыток показываем в строке таблицы. */
 const HISTORY_IN_ROW = 10;
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Начало суток: «списание сегодня» считается по календарю, а не по 24 часам. */
+function startOfDay(date: Date): Date {
+  const copy = new Date(date);
+  copy.setHours(0, 0, 0, 0);
+  return copy;
+}
+
+/** Одна ячейка CSV: кавычки и переводы строк экранируются по RFC 4180. */
+function csvCell(value: string): string {
+  if (!/[",\r\n]/.test(value)) return value;
+  return `"${value.replace(/"/g, '""')}"`;
+}
 
 /**
  * The operator's «Отменить автосписание» on the user's card in the panel,
@@ -194,6 +225,26 @@ export class AdminAutopayService implements OnModuleDestroy {
     readonly statuses?: string;
     /** Добавить завершённые (`CANCELLED`) и несостоявшиеся (`FAILED`). */
     readonly includeEnded?: boolean;
+    /** Шлюз: ANTILOPAY, PLATEGA, … */
+    readonly gateway?: PaymentGatewayType;
+    /** Метод провайдера: CARD или SBP. */
+    readonly method?: string;
+    /** Здоровье: OK / STALLED / PAST_DUE / DESYNC. */
+    readonly health?: string;
+    /** Только дубли: больше одной живой строки на подписку. */
+    readonly duplicatesOnly?: boolean;
+    /** Списание в ближайшие N дней; 0 — сегодня. */
+    readonly dueInDays?: number;
+    /** PAST_DUE, но VPN-подписка ещё активна. */
+    readonly pastDueWithActive?: boolean;
+    /** Есть неуспешные попытки списания. */
+    readonly failedAttemptsOnly?: boolean;
+    /** Помечены как лишние (`stranded_reason` заполнен). */
+    readonly strandedOnly?: boolean;
+    /** Показать скрытые уборкой строки (аудит). */
+    readonly includeHidden?: boolean;
+    /** Только скрытые уборкой строки. */
+    readonly hiddenOnly?: boolean;
     readonly take?: number;
     readonly skip?: number;
     /** Момент для health: подменяется в тестах. */
@@ -203,9 +254,26 @@ export class AdminAutopayService implements OnModuleDestroy {
     const skip = Math.max(query.skip ?? 0, 0);
     const statuses = resolveStatuses(query);
     const search = query.search?.trim();
+    const now = query.now ?? new Date();
+    // Фильтры, которым нужен второй проход по живым строкам (JSON попыток,
+    // дубли, активная подписка): строк немного, поэтому собираем id заранее и
+    // отдаём их в `where` — так и пагинация, и счётчик остаются точными.
+    const prefiltered = await this.prefilterIds(query, now);
 
     const where = {
       status: { in: statuses },
+      ...this.healthWhere(query.health, now),
+      ...this.dueWhere(query.dueInDays, now),
+      ...(query.hiddenOnly === true
+        ? { hiddenAt: { not: null } }
+        : query.includeHidden === true
+          ? {}
+          : { hiddenAt: null }),
+      ...(query.gateway === undefined ? {} : { gatewayType: query.gateway }),
+      ...(query.method === undefined ? {} : { method: query.method }),
+      ...(query.strandedOnly === true ? { strandedReason: { not: null } } : {}),
+      ...(prefiltered === null ? {} : { id: { in: prefiltered } }),
+      ...this.dueWhere(query.dueInDays, now),
       ...(search === undefined || search.length === 0
         ? {}
         : {
@@ -254,6 +322,9 @@ export class AdminAutopayService implements OnModuleDestroy {
           cancelNextTryAt: true,
           cancelLastError: true,
           manualCancelRequired: true,
+          providerRecurrentId: true,
+          hiddenAt: true,
+          hiddenReason: true,
           user: { select: { username: true, email: true, telegramId: true } },
         },
       }),
@@ -271,7 +342,59 @@ export class AdminAutopayService implements OnModuleDestroy {
         });
     const expiresById = new Map(subscriptions.map((sub) => [sub.id, sub.expiresAt] as const));
 
-    const now = query.now ?? new Date();
+    // Дубли: живые строки одной подписки. Считаем по всей базе, а не по
+    // странице — иначе на второй странице дубль выглядел бы единственным.
+    const liveRows = subscriptionIds.length === 0
+      ? []
+      : await this.prismaService.providerSubscription.findMany({
+          where: {
+            subscriptionId: { in: subscriptionIds },
+            status: { in: ['ACTIVE', 'PAST_DUE', 'PENDING'] },
+            hiddenAt: null,
+          },
+          select: { id: true, subscriptionId: true },
+        });
+    const liveBySubscription = new Map<string, string[]>();
+    for (const live of liveRows) {
+      if (live.subscriptionId === null) continue;
+      const list = liveBySubscription.get(live.subscriptionId) ?? [];
+      list.push(live.id);
+      liveBySubscription.set(live.subscriptionId, list);
+    }
+
+    // Чем продлено последнее: последняя COMPLETED-транзакция по подписке.
+    // Оператору важно отличить продление самим рекуррентом от ручной оплаты —
+    // именно это и создаёт «двойные» строки.
+    const renewals = subscriptionIds.length === 0
+      ? []
+      : await this.prismaService.transaction.findMany({
+          where: {
+            subscriptionId: { in: subscriptionIds },
+            status: 'COMPLETED',
+            // Год назад — с запасом: старые продления не нужны, а без границы
+            // запрос тянул бы всю историю подписок страницы.
+            createdAt: { gte: new Date(now.getTime() - 400 * DAY_MS) },
+          },
+          orderBy: { createdAt: 'desc' },
+          take: Math.min(subscriptionIds.length * 10, 500),
+          select: {
+            id: true,
+            subscriptionId: true,
+            createdAt: true,
+            purchaseType: true,
+            gatewayType: true,
+            gatewayData: true,
+            idempotencyKey: true,
+          },
+        });
+    const lastRenewalBySubscription = new Map<string, (typeof renewals)[number]>();
+    for (const renewal of renewals) {
+      if (renewal.subscriptionId === null) continue;
+      if (!lastRenewalBySubscription.has(renewal.subscriptionId)) {
+        lastRenewalBySubscription.set(renewal.subscriptionId, renewal);
+      }
+    }
+
     const items = rows.map((row): AdminAutopayRowInterface => {
       const history = readAutopayAttempts(row.attempts);
       return {
@@ -314,10 +437,212 @@ export class AdminAutopayService implements OnModuleDestroy {
         cancelNextTryAt: row.cancelNextTryAt?.toISOString() ?? null,
         cancelLastError: row.cancelLastError,
         manualCancelRequired: row.manualCancelRequired,
+        providerRecurrentId: row.providerRecurrentId,
+        duplicateRowIds: row.subscriptionId === null
+          ? []
+          : (liveBySubscription.get(row.subscriptionId) ?? []).filter((id) => id !== row.id),
+        lastRenewal: (() => {
+          if (row.subscriptionId === null) return null;
+          const renewal = lastRenewalBySubscription.get(row.subscriptionId);
+          if (renewal === undefined) return null;
+          return {
+            transactionId: renewal.id,
+            at: renewal.createdAt.toISOString(),
+            gatewayType: renewal.gatewayType,
+            purchaseType: renewal.purchaseType,
+            isAutopay: (renewal.idempotencyKey ?? '').startsWith('provider-subscription:'),
+          };
+        })(),
+        hiddenAt: row.hiddenAt?.toISOString() ?? null,
+        hiddenReason: row.hiddenReason,
       };
     });
 
     return { items, total, take, skip };
+  }
+
+  /** Условие «здоровье» для `where`: STALLED и DESYNC выражаются полями строки. */
+  private healthWhere(
+    health: string | undefined,
+    now: Date,
+  ): Record<string, unknown> {
+    const key = (health ?? '').trim().toUpperCase();
+    const stalledAfter = new Date(now.getTime() - STALLED_AFTER_MS);
+    if (key === 'STALLED') {
+      return {
+        status: { in: ['ACTIVE', 'PAST_DUE'] },
+        providerStatus: { in: ['PROCESSING', 'ACTIVE_FAILED'] },
+        nextChargeAt: { lt: stalledAfter },
+      };
+    }
+    if (key === 'DESYNC') {
+      return {
+        status: 'ACTIVE',
+        nextChargeAt: { lt: now },
+        NOT: {
+          providerStatus: { in: ['PROCESSING', 'ACTIVE_FAILED'] },
+          nextChargeAt: { lt: stalledAfter },
+        },
+      };
+    }
+    if (key === 'PAST_DUE') return { status: 'PAST_DUE' };
+    return {};
+  }
+
+  /** Списание в ближайшие N дней: 0 — сегодня, без значения — не фильтруем. */
+  private dueWhere(
+    dueInDays: number | undefined,
+    now: Date,
+  ): Record<string, unknown> {
+    if (dueInDays === undefined) return {};
+    const end = new Date(now.getTime() + Math.max(dueInDays, 0) * DAY_MS);
+    return {
+      status: { in: ['ACTIVE', 'PAST_DUE'] },
+      nextChargeAt: { gte: startOfDay(now), lte: end },
+    };
+  }
+
+  /**
+   * Id строк, которые проходят фильтры, требующие разбора данных: неуспешные
+   * попытки (`attempts` — JSON), дубли (нужна группировка) и PAST_DUE с живой
+   * подпиской. Живых строк немного, поэтому проход по ним дешевле, чем
+   * несколько запросов с JSON-условиями на каждую страницу.
+   */
+  private async prefilterIds(
+    query: { readonly duplicatesOnly?: boolean; readonly failedAttemptsOnly?: boolean; readonly pastDueWithActive?: boolean },
+    now: Date,
+  ): Promise<string[] | null> {
+    const needAttempts = query.failedAttemptsOnly === true;
+    const needDuplicates = query.duplicatesOnly === true;
+    const needActive = query.pastDueWithActive === true;
+    if (!needAttempts && !needDuplicates && !needActive) return null;
+
+    const live = await this.prismaService.providerSubscription.findMany({
+      where: {
+        status: { in: ['ACTIVE', 'PAST_DUE', 'PENDING'] },
+        hiddenAt: null,
+      },
+      select: { id: true, subscriptionId: true, status: true, attempts: true },
+    });
+
+    let ids = live.map((row) => row.id);
+    if (needDuplicates) {
+      const perSubscription = new Map<string, number>();
+      for (const row of live) {
+        if (row.subscriptionId === null) continue;
+        perSubscription.set(row.subscriptionId, (perSubscription.get(row.subscriptionId) ?? 0) + 1);
+      }
+      const duplicated = new Set(
+        [...perSubscription.entries()].filter(([, count]) => count > 1).map(([id]) => id),
+      );
+      ids = live
+        .filter((row) => row.subscriptionId !== null && duplicated.has(row.subscriptionId))
+        .map((row) => row.id);
+    }
+    if (needAttempts) {
+      const failing = new Set(
+        live
+          .filter((row) => summariseAutopayAttempts(row.attempts).failed > 0)
+          .map((row) => row.id),
+      );
+      ids = ids.filter((id) => failing.has(id));
+    }
+    if (needActive) {
+      const subscriptionIds = [
+        ...new Set(live.flatMap((row) => (row.subscriptionId === null ? [] : [row.subscriptionId]))),
+      ];
+      const active =
+        subscriptionIds.length === 0
+          ? []
+          : await this.prismaService.subscription.findMany({
+              where: { id: { in: subscriptionIds }, expiresAt: { gt: now } },
+              select: { id: true },
+            });
+      const activeIds = new Set(active.map((row) => row.id));
+      const pastDueActive = new Set(
+        live
+          .filter(
+            (row) =>
+              row.status === 'PAST_DUE' &&
+              row.subscriptionId !== null &&
+              activeIds.has(row.subscriptionId),
+          )
+          .map((row) => row.id),
+      );
+      ids = ids.filter((id) => pastDueActive.has(id));
+    }
+    return ids;
+  }
+
+  /**
+   * CSV текущего фильтра. Только внутренние id: ни логинов, ни email, ни
+   * телефонов — выгрузку пересылают, и персональные данные в ней не нужны.
+   */
+  public async exportCsv(
+    query: Parameters<AdminAutopayService['listAll']>[0],
+    now: Date = new Date(),
+  ): Promise<string> {
+    const collected: AdminAutopayRowInterface[] = [];
+    const pageSize = 200;
+    const cap = 2_000;
+    for (let skip = 0; skip < cap; skip += pageSize) {
+      const page = await this.listAll({ ...query, take: pageSize, skip, now });
+      collected.push(...page.items);
+      if (page.items.length === 0 || collected.length >= page.total) break;
+    }
+
+    const header = [
+      'row_id',
+      'user_id',
+      'telegram_id',
+      'gateway',
+      'method',
+      'status',
+      'provider_status',
+      'health',
+      'connected_at',
+      'next_charge_at',
+      'last_charge_at',
+      'amount',
+      'currency',
+      'charges_applied',
+      'charges_planned',
+      'subscription_expires_at',
+      'cancel_attempts',
+      'manual_cancel_required',
+      'provider_recurrent_id',
+      'stranded_reason',
+    ];
+    const lines = [header.join(',')];
+    for (const row of collected) {
+      lines.push(
+        [
+          row.providerSubscriptionRowId,
+          row.userId ?? '',
+          row.telegramId ?? '',
+          row.gatewayType,
+          row.method ?? '',
+          row.status,
+          row.providerStatus ?? '',
+          row.health,
+          row.connectedAt,
+          row.nextChargeAt ?? '',
+          row.lastChargeAt ?? '',
+          row.amount,
+          row.currency,
+          String(row.appliedChargeCount),
+          row.plannedChargeCount === null ? '' : String(row.plannedChargeCount),
+          row.expiresAt ?? '',
+          String(row.cancelAttempts),
+          row.manualCancelRequired ? 'true' : 'false',
+          row.providerRecurrentId ?? '',
+          row.strandedReason ?? '',
+        ]
+          .map(csvCell)
+          .join(','),
+      );
+    }
+    return lines.join('\r\n');
   }
 
   /**
@@ -328,6 +653,7 @@ export class AdminAutopayService implements OnModuleDestroy {
   public async summarise(now: Date = new Date()): Promise<AdminAutopaySummaryInterface> {
     const grouped = await this.prismaService.providerSubscription.groupBy({
       by: ['status'],
+      where: { hiddenAt: null },
       _count: { _all: true },
     });
     const byStatus: Record<string, number> = {};
@@ -338,6 +664,7 @@ export class AdminAutopayService implements OnModuleDestroy {
       where: {
         status: { in: [ProviderSubscriptionStatus.ACTIVE, ProviderSubscriptionStatus.PAST_DUE] },
         nextChargeAt: { gt: now, lte: in30Days },
+        hiddenAt: null,
       },
       select: { nextChargeAt: true, amount: true, currency: true, status: true, providerStatus: true },
     });
@@ -374,6 +701,7 @@ export class AdminAutopayService implements OnModuleDestroy {
             ProviderSubscriptionStatus.PENDING,
           ],
         },
+        hiddenAt: null,
       },
       select: { status: true, providerStatus: true, nextChargeAt: true },
     });

@@ -49,6 +49,21 @@ import {
 import { antilopayRefundEnvelope, completedAntilopayRefunds } from '../utils/antilopay-refund.util';
 import { appendAutopayAttempt, type AutopayAttempt } from '../utils/autopay-log.util';
 import {
+  type AutopayFlags,
+  readAutopayFlags,
+} from '../utils/autopay-flags.util';
+import {
+  type AutocancelMode,
+  autopayHealth,
+  cancelBackoffMs,
+  CANCEL_ALERT_AFTER_ATTEMPTS,
+  HIDDEN_REASON_STALE,
+  needsManualProviderCancel,
+  providerCancelSupported,
+  SUPERSEDED_BY_NEWER_AUTOPAY,
+  supersededByManualPayment,
+} from '../utils/autopay-health.util';
+import {
   AURAPAY_API,
   aurapayHeaders,
   parseAurapayInvoice,
@@ -175,6 +190,36 @@ export const PROVIDER_SUBSCRIPTION_DISPUTE = 'PROVIDER_SUBSCRIPTION_DISPUTE';
 
 /** Live rows `cancelStranded` reads at a time; it reads every one of them. */
 export const STRANDED_SWEEP_PAGE = 500;
+
+/** Сколько строк разбирает ежедневная уборка за прогон: дальше — следующий день. */
+export const STALE_CLEANUP_PAGE = 200;
+
+/** Пауза между отменами в уборке: провайдер не любит шквал запросов. */
+const STALE_CANCEL_PAUSE_MS = 2_500;
+
+/** Что сделала ежедневная уборка старых автосписаний. */
+export interface StaleAutopayReportInterface {
+  readonly mode: 'off' | 'dry-run' | 'apply';
+  /** Граница «старое»: дата списания раньше этого момента. */
+  readonly threshold: string;
+  /** Живых строк с датой в прошлом за порогом. */
+  readonly staleLive: number;
+  /** Отменено у провайдера подтверждённо. */
+  readonly cancelled: number;
+  /** Скрыто (soft-hide) — не видно даже с «показать завершённые». */
+  readonly hidden: number;
+  /** Не отменилось само: нужен оператор и ЛК Antilopay. */
+  readonly manualRequired: number;
+  /** Построчно: что сделали или что сделали бы в `dry-run`. */
+  readonly rows: readonly {
+    readonly rowId: string;
+    readonly action: string;
+    readonly providerStatus: string | null;
+    readonly nextChargeAt: string | null;
+    /** `recurrent_id` Antilopay — по нему строку ищут в ЛК. */
+    readonly recurrentId: string | null;
+  }[];
+}
 
 /** A live row as `cancelStranded` reads it: with its customer's block. */
 type StrandedCandidate = ProviderSubscription & { readonly user: { readonly isBlocked: boolean } | null };
@@ -786,6 +831,16 @@ export class ProviderSubscriptionService {
         : (state.status ?? current.status);
     const providerCancelled =
       status === ProviderSubscriptionStatus.CANCELLED && current.cancelledAt === null;
+    // «Завис» — состояние, а не наш enum: провайдер держит PROCESSING/ACTIVE_FAILED
+    // и не двигает дату. Храним только начало зависания: пока правило срабатывает,
+    // поле не перезаписывается; как только строка выздоровела — сбрасывается.
+    const stalledNow =
+      autopayHealth({
+        status,
+        providerStatus: state.providerStatus,
+        nextChargeAt: state.nextChargeAt,
+      }) === 'STALLED';
+    const stalledSince = stalledNow ? (current.stalledSince ?? new Date()) : null;
     await this.prismaService.providerSubscription.update({
       where: { id: row.id },
       data: {
@@ -794,6 +849,7 @@ export class ProviderSubscriptionService {
         nextChargeAt: state.nextChargeAt,
         lastChargeAt,
         lastSyncedAt: new Date(),
+        stalledSince,
         ...(state.endsAt === undefined ? {} : { endsAt: state.endsAt }),
         ...(state.plannedChargeCount === undefined ? {} : { plannedChargeCount: state.plannedChargeCount }),
         ...(subscriptionId !== null && row.subscriptionId === null ? { subscriptionId } : {}),
@@ -2346,6 +2402,211 @@ export class ProviderSubscriptionService {
       }
     }
     await this.cancelStranded();
+    await this.supersedeDuplicates().catch((error: unknown) => {
+      this.logger.warn(
+        `Supersede pass failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
+    await this.supersedeRenewedElsewhere().catch((error: unknown) => {
+      this.logger.warn(
+        `Supersede-elsewhere pass failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
+  }
+
+  /**
+   * Ежедневная уборка старых автосписаний (09:00 MSK).
+   *
+   * Владелец просил не видеть автосписания, у которых дата списания ушла больше
+   * шести дней назад, и получать список тех, что отменить не удалось, — с id,
+   * по которому их находят в ЛК Antilopay.
+   *
+   * Удалять строки нельзя: по `provider_recurrent_id` приходят callback'и (без
+   * строки списание станет неразмещённым), `delay_granted_at` помнит, что
+   * отсрочка уже выдана, а история попыток и первая транзакция нужны оператору.
+   * Поэтому только soft-hide: `hidden_at` + `hidden_reason`.
+   *
+   * Режим — `AUTOPAY_STALE_CLEANUP_MODE`: `dry-run` (по умолчанию) только
+   * показывает список, `apply` отменяет и скрывает, `off` не делает ничего.
+   */
+  @Cron('0 9 * * *', { name: 'provider-subscription-stale-cleanup', timeZone: 'Europe/Moscow' })
+  public async staleAutopayCleanup(now: Date = new Date()): Promise<StaleAutopayReportInterface> {
+    const flags = readAutopayFlags();
+    const threshold = new Date(now.getTime() - flags.staleDays * DAY_MS);
+    const report: {
+      mode: AutopayFlags['staleCleanupMode'];
+      threshold: string;
+      staleLive: number;
+      cancelled: number;
+      hidden: number;
+      manualRequired: number;
+      rows: StaleAutopayReportInterface['rows'][number][];
+    } = {
+      mode: flags.staleCleanupMode,
+      threshold: threshold.toISOString(),
+      staleLive: 0,
+      cancelled: 0,
+      hidden: 0,
+      manualRequired: 0,
+      rows: [],
+    };
+    if (flags.staleCleanupMode === 'off') return report;
+    if (!shouldRunSchedules()) return report;
+
+    // Живые строки, у которых дата списания ушла за порог.
+    const live = await this.prismaService.providerSubscription.findMany({
+      where: {
+        gatewayType: PaymentGatewayType.ANTILOPAY,
+        status: { in: [ProviderSubscriptionStatus.ACTIVE, ProviderSubscriptionStatus.PAST_DUE] },
+        hiddenAt: null,
+        nextChargeAt: { lt: threshold },
+      },
+      orderBy: { nextChargeAt: 'asc' },
+      take: STALE_CLEANUP_PAGE,
+    });
+    report.staleLive = live.length;
+
+    for (const row of live) {
+      const note = {
+        rowId: row.id,
+        providerStatus: row.providerStatus,
+        nextChargeAt: row.nextChargeAt?.toISOString() ?? null,
+        recurrentId: row.providerRecurrentId,
+      };
+      if (flags.staleCleanupMode === 'dry-run') {
+        report.rows.push({ ...note, action: 'cancel+hide' });
+        continue;
+      }
+      // Перед отменой сверяемся: если провайдер успел списать, строку не трогаем.
+      const before = row.appliedChargeCount;
+      await this.syncRow(row).catch((error: unknown) => {
+        this.logger.warn(`Stale cleanup: sync of ${row.id} failed: ${(error as Error).message}`);
+      });
+      const fresh = await this.prismaService.providerSubscription.findUnique({ where: { id: row.id } });
+      if (fresh === null) continue;
+      if (fresh.appliedChargeCount > before) {
+        report.rows.push({ ...note, action: 'skipped: charged meanwhile' });
+        continue;
+      }
+      if (fresh.status === ProviderSubscriptionStatus.CANCELLED) {
+        await this.hideRow(fresh.id, now);
+        report.hidden += 1;
+        report.rows.push({ ...note, action: 'hidden: already cancelled' });
+        continue;
+      }
+      if (!providerCancelSupported(fresh.providerStatus)) {
+        // Antilopay держит PROCESSING и не отменяет: карточка оператору, строка видна.
+        await this.deferCancel(
+          fresh,
+          `Antilopay did not cancel the stale recurrent (status ${fresh.providerStatus ?? 'unknown'})`,
+          true,
+        );
+        report.manualRequired += 1;
+        report.rows.push({ ...note, action: 'manual: not cancellable at provider' });
+        continue;
+      }
+      try {
+        await this.cancel(fresh, 'SYSTEM');
+        await this.resetCancelState(fresh.id);
+        await this.hideRow(fresh.id, now);
+        report.cancelled += 1;
+        report.hidden += 1;
+        await this.writeSystemAudit('payments.autopay.stale_cancelled', {
+          rowId: fresh.id,
+          gateway: fresh.gatewayType,
+          providerStatusBefore: fresh.providerStatus,
+          nextChargeAt: fresh.nextChargeAt?.toISOString() ?? null,
+          providerRecurrentId: fresh.providerRecurrentId,
+        });
+        report.rows.push({ ...note, action: 'cancelled+hidden' });
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.error(`Stale cleanup could not cancel ${fresh.id}: ${message}`);
+        await this.deferCancel(fresh, message, false);
+        report.manualRequired += 1;
+        report.rows.push({ ...note, action: `failed: ${message.slice(0, 120)}` });
+      }
+      await new Promise((resolve) => setTimeout(resolve, STALE_CANCEL_PAUSE_MS));
+    }
+    // Завершённые, несостоявшиеся и неоплаченные оформления старше порога — только скрыть.
+    const hideable = await this.prismaService.providerSubscription.findMany({
+      where: {
+        gatewayType: PaymentGatewayType.ANTILOPAY,
+        hiddenAt: null,
+        OR: [
+          {
+            status: {
+              in: [
+                ProviderSubscriptionStatus.CANCELLED,
+                ProviderSubscriptionStatus.FAILED,
+                ProviderSubscriptionStatus.PENDING,
+              ],
+            },
+            createdAt: { lt: threshold },
+          },
+          {
+            status: ProviderSubscriptionStatus.CANCELLED,
+            cancelledAt: { lt: threshold },
+          },
+        ],
+      },
+      select: { id: true, status: true },
+      take: STALE_CLEANUP_PAGE,
+    });
+    if (flags.staleCleanupMode === 'dry-run') {
+      report.hidden += hideable.length;
+      for (const row of hideable) {
+        report.rows.push({
+          rowId: row.id,
+          action: 'hide',
+          providerStatus: null,
+          nextChargeAt: null,
+          recurrentId: null,
+        });
+      }
+    } else {
+      for (const row of hideable) {
+        await this.hideRow(row.id, now);
+        report.hidden += 1;
+        await this.writeSystemAudit('payments.autopay.stale_hidden', {
+          rowId: row.id,
+          status: row.status,
+          reason: HIDDEN_REASON_STALE,
+        });
+      }
+    }
+
+    this.logger.log(
+      `Stale autopay cleanup (${report.mode}): live ${report.staleLive}, cancelled ${report.cancelled}, ` +
+        `hidden ${report.hidden}, manual ${report.manualRequired}`,
+    );
+    if (report.mode === 'dry-run' && (report.staleLive > 0 || report.hidden > 0)) {
+      this.systemEvents?.warn(
+        EVENT_TYPES.PAYMENT_AUTOPAY_ATTENTION,
+        'PAYMENT',
+        'Уборка старых автосписаний: пробный прогон',
+        {
+          reason: 'AUTOPAY_STALE_DRY_RUN',
+          staleLive: report.staleLive,
+          hidden: report.hidden,
+          manualRequired: report.manualRequired,
+          needsManualReview: false,
+          note:
+            `Найдено ${report.staleLive} живых автосписаний с датой старше ${flags.staleDays} дней ` +
+            `и ${report.hidden} завершённых. Ничего не изменено: включите AUTOPAY_STALE_CLEANUP_MODE=apply.`,
+        },
+      );
+    }
+
+    return report;
+  }
+
+  /** Soft-hide: строка уходит из таблицы, но остаётся в базе. */
+  private async hideRow(id: string, now: Date): Promise<void> {
+    await this.prismaService.providerSubscription.updateMany({
+      where: { id, hiddenAt: null },
+      data: { hiddenAt: now, hiddenReason: HIDDEN_REASON_STALE },
+    });
   }
 
   /**
@@ -2439,6 +2700,31 @@ export class ProviderSubscriptionService {
         planId: row.planId,
       });
       if (reason === null) continue;
+      // Backoff: строку, у которой провайдер отказал (или держит PROCESSING), не
+      // дёргаем каждые десять минут. До назначенного момента — пропускаем.
+      // `?.` — у строк из тестов поле может отсутствовать, у базы — null.
+      if ((row.cancelNextTryAt?.getTime() ?? 0) > now.getTime()) continue;
+
+      // Причина видна оператору в таблице, даже если отмена не удалась.
+      if (row.strandedReason !== reason) {
+        await this.prismaService.providerSubscription.updateMany({
+          where: { id: row.id },
+          data: { strandedReason: reason, strandedAt: row.strandedAt ?? now },
+        });
+      }
+
+      // Antilopay в PROCESSING не отменяет: `payment/recurrent/cancel` проходит,
+      // но повторный `check` всё равно отдаёт PROCESSING, и строка висит.
+      // Значит API не зовём — копим попытки и зовём оператора в ЛК.
+      if (row.gatewayType === PaymentGatewayType.ANTILOPAY && needsManualProviderCancel(row.providerStatus)) {
+        await this.deferCancel(
+          row,
+          `Antilopay did not cancel the recurrent (status ${row.providerStatus ?? 'unknown'})`,
+          true,
+        );
+        continue;
+      }
+
       try {
         await this.cancel(
           row,
@@ -2449,15 +2735,328 @@ export class ProviderSubscriptionService {
               : 'SYSTEM',
         );
         cancelled += 1;
+        await this.resetCancelState(row.id);
+        await this.writeSystemAudit('payments.autopay.stranded_cancelled', {
+          rowId: row.id,
+          gateway: row.gatewayType,
+          providerStatusBefore: row.providerStatus,
+          reason,
+        });
         this.logger.log(`Cancelled provider subscription ${row.id} at ${row.gatewayType}: ${reason}`);
       } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
         this.logger.error(
-          `Could not cancel stranded provider subscription ${row.id} (${reason}): ` +
-            `${error instanceof Error ? error.message : String(error)}`,
+          `Could not cancel stranded provider subscription ${row.id} (${reason}): ${message}`,
         );
+        await this.deferCancel(row, message, false);
       }
     }
     return cancelled;
+  }
+
+  /**
+   * Откладывает отмену по расписанию и, после третьей неудачи, один раз в сутки
+   * говорит оператору: «отмените вручную в ЛК провайдера».
+   *
+   * `manual` — провайдер такую строку не отменяет вообще (PROCESSING): API
+   * дальше не зовём, только ждём, пока это сделает оператор руками.
+   */
+  private async deferCancel(row: ProviderSubscription, message: string, manual: boolean): Promise<void> {
+    const attempts = (row.cancelAttempts ?? 0) + 1;
+    const nextTryAt = new Date(Date.now() + cancelBackoffMs(attempts - 1));
+    await this.prismaService.providerSubscription.updateMany({
+      where: { id: row.id },
+      data: {
+        cancelAttempts: attempts,
+        cancelNextTryAt: nextTryAt,
+        cancelLastError: message.slice(0, 500),
+        ...(manual ? { manualCancelRequired: true } : {}),
+      },
+    });
+    if (attempts < CANCEL_ALERT_AFTER_ATTEMPTS && !manual) return;
+    await this.alertManualCancel(row, attempts, message);
+  }
+
+  /** Успешная отмена снимает счётчики: строка больше не «в работе». */
+  private async resetCancelState(rowId: string): Promise<void> {
+    await this.prismaService.providerSubscription.updateMany({
+      where: { id: rowId },
+      data: {
+        cancelAttempts: 0,
+        cancelNextTryAt: null,
+        cancelLastError: null,
+        manualCancelRequired: false,
+        strandedAt: null,
+      },
+    });
+  }
+
+  /**
+   * Карточка оператору «провайдер не отменяет — отмените в ЛК». Не чаще раза в
+   * сутки на строку: иначе PROCESSING-строка давала бы карточку каждый час.
+   */
+  private async alertManualCancel(row: ProviderSubscription, attempts: number, message: string): Promise<void> {
+    const since = new Date(Date.now() - DAY_MS);
+    const already = await this.prismaService.adminAuditLog
+      .count({
+        where: {
+          action: 'payments.autopay.manual_cancel_required',
+          createdAt: { gte: since },
+          metadata: { path: ['rowId'], equals: row.id },
+        },
+      })
+      .catch(() => 0);
+    if (already > 0) return;
+
+    const recurrent = row.providerRecurrentId;
+    await this.writeSystemAudit('payments.autopay.manual_cancel_required', {
+      rowId: row.id,
+      gateway: row.gatewayType,
+      providerStatus: row.providerStatus,
+      providerRecurrentId: recurrent,
+      attempts,
+      error: message.slice(0, 300),
+    });
+    this.systemEvents?.warn(
+      EVENT_TYPES.PAYMENT_AUTOPAY_ATTENTION,
+      'PAYMENT',
+      'Провайдер не отменяет автосписание: отмените вручную в личном кабинете',
+      {
+        gatewayType: row.gatewayType,
+        reason: 'AUTOPAY_CANCEL_MANUAL_REQUIRED',
+        rowId: row.id,
+        ...(recurrent === null ? {} : { providerRecurrentId: recurrent }),
+        ...(row.userId === null ? {} : { userId: row.userId }),
+        providerStatus: row.providerStatus,
+        attempts,
+        needsManualReview: true,
+        note:
+          `Antilopay не отменяет рекуррент ${recurrent ?? row.providerSubscriptionId} ` +
+          `(статус ${row.providerStatus ?? 'неизвестен'}). Откройте ЛК Antilopay (lk.antilopay.com) → проект → ` +
+          'рекуррентные платежи/подписки → найдите по recurrent_id; если не находится — по APAY-id первого ' +
+          'платежа или order_id и отмените с его карточки. Затем в панели нажмите «Отменено вручную в ЛК»: ' +
+          'строка свернётся и скроется.',
+      },
+    );
+  }
+
+  /** Запись в журнал действий админов от имени системы (actor = SYSTEM). */
+  private async writeSystemAudit(action: string, metadata: Record<string, unknown>): Promise<void> {
+    try {
+      await this.prismaService.adminAuditLog.create({
+        data: { action, metadata: metadata as Prisma.InputJsonValue, adminUserId: null },
+      });
+    } catch (error: unknown) {
+      this.logger.warn(`Failed to write ${action}: ${(error as Error).message}`);
+    }
+  }
+
+  /**
+   * Подписку продлили ручной оплатой — живая автоподписка на ней становится
+   * лишней и спишет ещё раз. Правило владельца (20.11.2026).
+   *
+   * Режим — `AUTOPAY_AUTOCANCEL_ON_MANUAL_RENEW`:
+   * - `off` — ничего не делаем;
+   * - `mark` (по умолчанию) — ставим `stranded_reason`, оператор видит строку;
+   * - `cancel` — отменяем у провайдера. Antilopay в PROCESSING не отменяет:
+   *   тогда отметка `manual_cancel_required` и карточка «отмените в ЛК».
+   *
+   * Транзакцию ручной оплаты и автоподписку, созданную этой же оплатой, не
+   * трогаем: `firstTransactionId === transactionId` — это её собственный платёж.
+   */
+  public async supersedeAfterManualRenewal(input: {
+    readonly subscriptionId: string;
+    readonly transactionId: string;
+    readonly mode?: AutocancelMode;
+  }): Promise<{ marked: number; cancelled: number; manual: number }> {
+    const mode = input.mode ?? readAutopayFlags().autocancelOnManualRenew;
+    const result = { marked: 0, cancelled: 0, manual: 0 };
+    if (mode === 'off') return result;
+
+    const rows = await this.prismaService.providerSubscription.findMany({
+      where: {
+        subscriptionId: input.subscriptionId,
+        status: { in: [ProviderSubscriptionStatus.ACTIVE, ProviderSubscriptionStatus.PAST_DUE] },
+        hiddenAt: null,
+        firstTransactionId: { not: input.transactionId },
+      },
+    });
+
+    const reason = supersededByManualPayment(input.transactionId);
+    const now = new Date();
+    for (const row of rows) {
+      await this.prismaService.providerSubscription.updateMany({
+        where: { id: row.id },
+        data: { strandedReason: reason, strandedAt: row.strandedAt ?? now },
+      });
+      result.marked += 1;
+      await this.writeSystemAudit('payments.autopay.superseded_by_manual_payment', {
+        rowId: row.id,
+        transactionId: input.transactionId,
+        subscriptionId: input.subscriptionId,
+        gateway: row.gatewayType,
+        providerStatus: row.providerStatus,
+        mode,
+      });
+      if (mode !== 'cancel') continue;
+      await this.cancelSupersededRow(row, `status ${row.providerStatus ?? 'unknown'}`, result);
+    }
+    return result;
+  }
+
+  /** Отмена «лишней» строки по режиму `cancel`; PROCESSING уходит оператору. */
+  private async cancelSupersededRow(
+    row: ProviderSubscription,
+    note: string,
+    result: { cancelled: number; manual: number },
+  ): Promise<void> {
+    if (!providerCancelSupported(row.providerStatus)) {
+      await this.deferCancel(row, `Antilopay did not cancel the superseded recurrent (${note})`, true);
+      result.manual += 1;
+      return;
+    }
+    try {
+      await this.cancel(row, 'SYSTEM');
+      await this.resetCancelState(row.id);
+      result.cancelled += 1;
+      await this.writeSystemAudit('payments.autopay.superseded_cancelled', {
+        rowId: row.id,
+        gateway: row.gatewayType,
+        providerStatusBefore: row.providerStatus,
+        subscriptionId: row.subscriptionId,
+      });
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Could not cancel superseded subscription ${row.id}: ${message}`);
+      await this.deferCancel(row, message, false);
+      result.manual += 1;
+    }
+  }
+
+  /**
+   * Строки, где подписку продлили НЕ этим рекуррентом: до конца доступа
+   * больше, чем период одного списания вперёд от даты списания. Так выглядели
+   * случаи, когда клиент платил вручную (или второй автоподпиской), а старая
+   * строка оставалась живой и готова была списать ещё раз.
+   *
+   * Правило: `expires_at > next_charge_at + duration_days`. Если дата списания
+   * уже прошла, срок всё равно сравнивается — это тоже признак, что вперёд
+   * заплачено больше, чем даёт одно списание этой строки.
+   */
+  public async supersedeRenewedElsewhere(now = new Date()): Promise<{ marked: number; cancelled: number }> {
+    const mode = readAutopayFlags().autocancelMode;
+    const result = { marked: 0, cancelled: 0 };
+    if (mode === 'off') return result;
+
+    const rows = await this.prismaService.providerSubscription.findMany({
+      where: {
+        status: { in: [ProviderSubscriptionStatus.ACTIVE, ProviderSubscriptionStatus.PAST_DUE] },
+        hiddenAt: null,
+        subscriptionId: { not: null },
+      },
+      select: { id: true, subscriptionId: true, nextChargeAt: true, durationDays: true },
+      take: 500,
+    });
+    const ids = [...new Set(rows.flatMap((row) => (row.subscriptionId === null ? [] : [row.subscriptionId])))];
+    const subscriptions =
+      ids.length === 0
+        ? []
+        : await this.prismaService.subscription.findMany({
+            where: { id: { in: ids } },
+            select: { id: true, expiresAt: true },
+          });
+    const expiresById = new Map(subscriptions.map((row) => [row.id, row.expiresAt] as const));
+
+    for (const row of rows) {
+      if (row.subscriptionId === null) continue;
+      const expiresAt = expiresById.get(row.subscriptionId) ?? null;
+      if (expiresAt === null) continue;
+      // Отсчёт от даты списания, а если она в прошлом — от сегодняшнего дня.
+      const base = row.nextChargeAt === null || row.nextChargeAt.getTime() < now.getTime()
+        ? now
+        : row.nextChargeAt;
+      const coveredUntil = new Date(base.getTime() + row.durationDays * DAY_MS);
+      if (expiresAt.getTime() <= coveredUntil.getTime() + DAY_MS) continue;
+
+      const reason = `superseded: renewed by another payment (access until ${expiresAt.toISOString().slice(0, 10)})`;
+      await this.prismaService.providerSubscription.updateMany({
+        where: { id: row.id },
+        data: { strandedReason: reason, strandedAt: now },
+      });
+      result.marked += 1;
+      await this.writeSystemAudit('payments.autopay.superseded_renewed_elsewhere', {
+        rowId: row.id,
+        subscriptionId: row.subscriptionId,
+        expiresAt: expiresAt.toISOString(),
+        mode,
+      });
+      if (mode !== 'cancel') continue;
+      const full = await this.prismaService.providerSubscription.findUnique({ where: { id: row.id } });
+      if (full === null) continue;
+      const outcome = { cancelled: 0, manual: 0 };
+      await this.cancelSupersededRow(full, 'подписка продлена не этим рекуррентом', outcome);
+      result.cancelled += outcome.cancelled;
+    }
+    return result;
+  }
+
+  /**
+   * Дубли: на одной подписке несколько живых автоподписок. Оставляем самую
+   * новую, остальные помечаем «заменена новой» и, по режиму, отменяем.
+   *
+   * Дубли появляются, когда первое списание не прошло, клиент оформил новую
+   * автоподписку, а старая осталась живой и готова списать ещё раз.
+   */
+  public async supersedeDuplicates(): Promise<{ marked: number; cancelled: number }> {
+    const mode = readAutopayFlags().autocancelMode;
+    const result = { marked: 0, cancelled: 0 };
+    if (mode === 'off') return result;
+
+    const live = await this.prismaService.providerSubscription.findMany({
+      where: {
+        status: { in: [ProviderSubscriptionStatus.ACTIVE, ProviderSubscriptionStatus.PAST_DUE] },
+        hiddenAt: null,
+        subscriptionId: { not: null },
+      },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    });
+    const bySubscription = new Map<string, ProviderSubscription[]>();
+    for (const row of live) {
+      if (row.subscriptionId === null) continue;
+      const list = bySubscription.get(row.subscriptionId) ?? [];
+      list.push(row);
+      bySubscription.set(row.subscriptionId, list);
+    }
+
+    const now = new Date();
+    for (const rows of bySubscription.values()) {
+      if (rows.length < 2) continue;
+      // Самая новая строка — та, что клиент оформил последней: её не трогаем.
+      const newest = [...rows].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0]!;
+      for (const row of rows) {
+        if (row.id === newest.id) continue;
+        // `?.` — у строк из тестов поле может отсутствовать, у базы — null.
+      if ((row.cancelNextTryAt?.getTime() ?? 0) > now.getTime()) continue;
+        await this.prismaService.providerSubscription.updateMany({
+          where: { id: row.id },
+          data: { strandedReason: SUPERSEDED_BY_NEWER_AUTOPAY, strandedAt: row.strandedAt ?? now },
+        });
+        result.marked += 1;
+        await this.writeSystemAudit('payments.autopay.superseded_by_newer_autopay', {
+          rowId: row.id,
+          newerRowId: newest.id,
+          subscriptionId: row.subscriptionId,
+          gateway: row.gatewayType,
+          providerStatus: row.providerStatus,
+          mode,
+        });
+        if (mode !== 'cancel') continue;
+        const outcome = { cancelled: 0, manual: 0 };
+        await this.cancelSupersededRow(row, `новой строкой ${newest.id}`, outcome);
+        result.cancelled += outcome.cancelled;
+      }
+    }
+    return result;
   }
 
   /**

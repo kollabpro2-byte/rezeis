@@ -1,6 +1,6 @@
-import { Controller, Get, HttpCode, HttpStatus, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { Controller, Get, Header, HttpCode, HttpStatus, Param, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { Request } from 'express';
+import { Request, Response } from 'express';
 
 import { CurrentAdmin } from '../../auth/decorators/current-admin.decorator';
 import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
@@ -54,6 +54,23 @@ export class AdminPaymentAutopayController {
   @RequirePermission('payments', 'view')
   public async summary(): Promise<AdminAutopaySummaryInterface> {
     return this.adminAutopayService.summarise();
+  }
+
+  /**
+   * CSV текущего фильтра. Только внутренние id и суммы: логины, email и
+   * телефоны в выгрузку не попадают.
+   */
+  @Get('export.csv')
+  @Header('Content-Type', 'text/csv; charset=utf-8')
+  @Header('Content-Disposition', 'attachment; filename="autopay.csv"')
+  @ApiOperation({ summary: 'Выгрузка автосписаний в CSV по текущему фильтру' })
+  @RequirePermission('payments', 'view')
+  public async exportCsv(
+    @Query() query: AdminAutopayListQueryDto,
+    @Res() response: Response,
+  ): Promise<void> {
+    const csv = await this.adminAutopayService.exportCsv(query);
+    response.send(csv);
   }
 
   /**

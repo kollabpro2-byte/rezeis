@@ -205,11 +205,36 @@ describe('AdminPaymentAutopayController', () => {
   it('reads on payments:view and ends an autopay on payments:edit, every route guarded', () => {
     assert.equal(Reflect.getMetadata(PATH_METADATA, AdminPaymentAutopayController), BASE_PATH);
     assert.deepStrictEqual(Reflect.getMetadata(GUARDS_METADATA, AdminPaymentAutopayController), [AdminJwtAuthGuard, RbacGuard]);
-    assertRouteHandlers(AdminPaymentAutopayController, ['listForUser', 'cancelProviderSubscription', 'disableYookassaAutopay']);
+    assertRouteHandlers(AdminPaymentAutopayController, [
+      'listForUser',
+      'cancelProviderSubscription',
+      'disableYookassaAutopay',
+      'list',
+      'summary',
+      'cancelById',
+      'exportCsv',
+    ]);
 
     const list = routeLabel(BASE_PATH, RequestMethod.GET, 'users/:userId');
     assertRoute(AdminPaymentAutopayController.prototype.listForUser, { method: RequestMethod.GET, path: 'users/:userId' }, list);
     assertRoutePermission(AdminPaymentAutopayController.prototype.listForUser, { resource: 'payments', action: 'view' }, list);
+
+    // Таблица «Автосписания»: чтение — payments:view, отмена — payments:edit.
+    const table = routeLabel(BASE_PATH, RequestMethod.GET, '/');
+    assertRoute(AdminPaymentAutopayController.prototype.list, { method: RequestMethod.GET, path: '/' }, table);
+    assertRoutePermission(AdminPaymentAutopayController.prototype.list, { resource: 'payments', action: 'view' }, table);
+
+    const summary = routeLabel(BASE_PATH, RequestMethod.GET, 'summary');
+    assertRoute(AdminPaymentAutopayController.prototype.summary, { method: RequestMethod.GET, path: 'summary' }, summary);
+    assertRoutePermission(AdminPaymentAutopayController.prototype.summary, { resource: 'payments', action: 'view' }, summary);
+
+    const exportCsv = routeLabel(BASE_PATH, RequestMethod.GET, 'export.csv');
+    assertRoute(AdminPaymentAutopayController.prototype.exportCsv, { method: RequestMethod.GET, path: 'export.csv' }, exportCsv);
+    assertRoutePermission(AdminPaymentAutopayController.prototype.exportCsv, { resource: 'payments', action: 'view' }, exportCsv);
+
+    const cancelById = routeLabel(BASE_PATH, RequestMethod.POST, ':providerSubscriptionRowId/cancel');
+    assertRoute(AdminPaymentAutopayController.prototype.cancelById, { method: RequestMethod.POST, path: ':providerSubscriptionRowId/cancel' }, cancelById);
+    assertRoutePermission(AdminPaymentAutopayController.prototype.cancelById, { resource: 'payments', action: 'edit' }, cancelById);
 
     const cancelPath = 'users/:userId/provider-subscriptions/:providerSubscriptionRowId/cancel';
     const cancel = routeLabel(BASE_PATH, RequestMethod.POST, cancelPath);

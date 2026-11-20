@@ -2,12 +2,13 @@ import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router'
-import { AlertTriangle, CalendarClock, CheckCircle2, RefreshCw, XCircle } from 'lucide-react'
+import { AlertTriangle, CalendarClock, CheckCircle2, Download, RefreshCw, XCircle } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
 import { adminQueryKeys } from '@/lib/admin-query-keys'
 import { getErrorMessage } from '@/lib/http-errors'
+import { downloadCsv } from '@/features/partners/csv-download'
 import { activeLocale } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -77,6 +78,18 @@ interface AutopayRow {
   readonly cancelNextTryAt: string | null
   readonly cancelLastError: string | null
   readonly manualCancelRequired: boolean
+  /** `recurrent_id` Antilopay: по нему строку ищут в личном кабинете. */
+  readonly providerRecurrentId: string | null
+  /** Другие живые строки той же подписки: «дубль». */
+  readonly duplicateRowIds: readonly string[]
+  /** Чем продлена подписка в последний раз: автосписание или ручная оплата. */
+  readonly lastRenewal: {
+    readonly transactionId: string
+    readonly at: string
+    readonly gatewayType: string
+    readonly purchaseType: string
+    readonly isAutopay: boolean
+  } | null
 }
 
 /** Сводка вкладки: `AdminAutopaySummaryInterface`. */
@@ -138,7 +151,13 @@ export default function AutopayPage() {
   const canEdit = useHasPermission('payments', 'edit')
   const [search, setSearch] = useState('')
   const [includeEnded, setIncludeEnded] = useState(false)
+  const [health, setHealth] = useState<string | null>(null)
+  const [duplicatesOnly, setDuplicatesOnly] = useState(false)
+  const [dueInDays, setDueInDays] = useState<number | null>(null)
+  const [failedAttemptsOnly, setFailedAttemptsOnly] = useState(false)
+  const [strandedOnly, setStrandedOnly] = useState(false)
   const [page, setPage] = useState(0)
+  const [exporting, setExporting] = useState(false)
 
   const queryParams = useMemo(() => {
     const params = new URLSearchParams({ take: String(PAGE_SIZE), skip: String(page * PAGE_SIZE) })
@@ -146,8 +165,13 @@ export default function AutopayPage() {
     // По умолчанию — живые: ACTIVE и PAST_DUE. Переключатель добавляет
     // завершённые и несостоявшиеся (CANCELLED/FAILED) и ещё не подтверждённые.
     params.set('statuses', includeEnded ? ALL_STATUSES : LIVE_STATUSES)
+    if (health !== null) params.set('health', health)
+    if (duplicatesOnly) params.set('duplicatesOnly', 'true')
+    if (dueInDays !== null) params.set('dueInDays', String(dueInDays))
+    if (failedAttemptsOnly) params.set('failedAttemptsOnly', 'true')
+    if (strandedOnly) params.set('strandedOnly', 'true')
     return params.toString()
-  }, [search, includeEnded, page])
+  }, [search, includeEnded, health, duplicatesOnly, dueInDays, failedAttemptsOnly, strandedOnly, page])
 
   const { data, isLoading, refetch, isFetching } = useQuery<AutopayList>({
     queryKey: adminQueryKeys.subscriptions.autopay(queryParams),
@@ -164,9 +188,21 @@ export default function AutopayPage() {
 
   const cancel = useMutation({
     mutationFn: async (row: AutopayRow) =>
-      (await api.post(`/admin/payments/autopay/${row.providerSubscriptionRowId}/cancel`)).data,
-    onSuccess: async () => {
-      toast.success(t('autopayPage.cancelDone'))
+      (
+        await api.post<{ state: 'CANCELLING' | 'ENDED' | 'REFUND_ENDING' }>(
+          `/admin/payments/autopay/${row.providerSubscriptionRowId}/cancel`,
+        )
+      ).data,
+    onSuccess: async (result) => {
+      // Итог у провайдера приходит асинхронно: сразу показываем, что отмена
+      // отправлена (или что отменять уже нечего), а строку перечитываем.
+      toast.success(
+        result.state === 'ENDED'
+          ? t('autopayPage.cancelEnded')
+          : result.state === 'REFUND_ENDING'
+            ? t('autopayPage.cancelRefundEnding')
+            : t('autopayPage.cancelDone'),
+      )
       await queryClient.invalidateQueries({
         queryKey: adminQueryKeys.subscriptions.autopay(queryParams),
       })
@@ -176,6 +212,21 @@ export default function AutopayPage() {
 
   const items = data?.items ?? []
   const total = data?.total ?? 0
+
+  /** CSV текущего фильтра: те же условия, что в таблице. */
+  const exportCsv = async (): Promise<void> => {
+    setExporting(true)
+    try {
+      const params = Object.fromEntries(new URLSearchParams(queryParams).entries())
+      delete params.take
+      delete params.skip
+      await downloadCsv({ path: '/admin/payments/autopay/export.csv', filename: 'autopay.csv', params })
+    } catch (error: unknown) {
+      toast.error(getErrorMessage(error, t('autopayPage.exportFailed')))
+    } finally {
+      setExporting(false)
+    }
+  }
   return (
     <div className="space-y-6">
       <FadeIn>
@@ -215,7 +266,35 @@ export default function AutopayPage() {
         >
           {t('autopayPage.endedFilter')}
         </Button>
+        <Button variant="outline" size="sm" onClick={() => void exportCsv()} disabled={exporting}>
+          <Download className="mr-1 h-4 w-4" />
+          {t('autopayPage.exportCsv')}
+        </Button>
         <div className="text-sm text-muted-foreground">{t('autopayPage.total', { count: total })}</div>
+      </div>
+
+      <div className="flex items-center gap-2 flex-wrap">
+        {[
+          { key: 'STALLED', active: health === 'STALLED', label: t('autopayPage.filters.stalled'), toggle: () => setHealth(health === 'STALLED' ? null : 'STALLED') },
+          { key: 'DESYNC', active: health === 'DESYNC', label: t('autopayPage.filters.desync'), toggle: () => setHealth(health === 'DESYNC' ? null : 'DESYNC') },
+          { key: 'dupes', active: duplicatesOnly, label: t('autopayPage.filters.duplicates'), toggle: () => setDuplicatesOnly((value) => !value) },
+          { key: 'today', active: dueInDays === 0, label: t('autopayPage.filters.dueToday'), toggle: () => setDueInDays(dueInDays === 0 ? null : 0) },
+          { key: '7d', active: dueInDays === 7, label: t('autopayPage.filters.due7d'), toggle: () => setDueInDays(dueInDays === 7 ? null : 7) },
+          { key: 'failed', active: failedAttemptsOnly, label: t('autopayPage.filters.failedAttempts'), toggle: () => setFailedAttemptsOnly((value) => !value) },
+          { key: 'stranded', active: strandedOnly, label: t('autopayPage.filters.stranded'), toggle: () => setStrandedOnly((value) => !value) },
+        ].map((chip) => (
+          <Button
+            key={chip.key}
+            variant={chip.active ? 'default' : 'outline'}
+            size="sm"
+            onClick={() => {
+              chip.toggle()
+              setPage(0)
+            }}
+          >
+            {chip.label}
+          </Button>
+        ))}
       </div>
 
       {summary && (
@@ -267,6 +346,8 @@ export default function AutopayPage() {
                   <TableHead>{t('autopayPage.columns.attempts')}</TableHead>
                   <TableHead>{t('autopayPage.columns.nextCharge')}</TableHead>
                   <TableHead>{t('autopayPage.columns.expires')}</TableHead>
+                  <TableHead>{t('autopayPage.columns.charges')}</TableHead>
+                  <TableHead>{t('autopayPage.columns.lastRenewal')}</TableHead>
                   <TableHead>{t('autopayPage.columns.status')}</TableHead>
                   <TableHead />
                 </TableRow>
@@ -291,6 +372,11 @@ export default function AutopayPage() {
                         {row.strandedReason !== null && (
                           <span className="text-xs text-amber-600">
                             {t('autopayPage.stranded', { reason: row.strandedReason })}
+                          </span>
+                        )}
+                        {row.duplicateRowIds.length > 0 && (
+                          <span className="text-xs text-amber-600">
+                            {t('autopayPage.duplicate', { count: row.duplicateRowIds.length })}
                           </span>
                         )}
                         {row.manualCancelRequired && (
@@ -352,6 +438,27 @@ export default function AutopayPage() {
                         new Date(row.expiresAt) < new Date(row.nextChargeAt) && (
                           <AlertTriangle className="ml-1 inline h-3.5 w-3.5 text-amber-500" />
                         )}
+                    </TableCell>
+                    <TableCell className="tabular-nums text-sm">
+                      {row.plannedChargeCount === null
+                        ? String(row.appliedChargeCount)
+                        : `${row.appliedChargeCount} / ${row.plannedChargeCount >= 99_999 ? '∞' : row.plannedChargeCount}`}
+                    </TableCell>
+                    <TableCell className="text-sm">
+                      {row.lastRenewal === null ? (
+                        <span className="text-muted-foreground">—</span>
+                      ) : (
+                        <div className="flex flex-col">
+                          <span className={row.lastRenewal.isAutopay ? '' : 'text-amber-600'}>
+                            {row.lastRenewal.isAutopay
+                              ? t('autopayPage.renewal.autopay')
+                              : t('autopayPage.renewal.manual')}
+                          </span>
+                          <span className="text-xs text-muted-foreground tabular-nums">
+                            {row.lastRenewal.gatewayType} · {formatDateTime(row.lastRenewal.at)}
+                          </span>
+                        </div>
+                      )}
                     </TableCell>
                     <TableCell>
                       <div className="flex flex-col gap-1">

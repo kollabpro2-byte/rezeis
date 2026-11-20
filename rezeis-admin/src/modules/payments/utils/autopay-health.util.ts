@@ -98,3 +98,54 @@ export function readAutocancelMode(value: unknown, fallback: AutocancelMode = 'm
   const text = typeof value === 'string' ? value.trim().toLowerCase() : '';
   return text === 'off' || text === 'mark' || text === 'cancel' ? text : fallback;
 }
+
+/** Режим ежедневной уборки старых автосписаний. */
+export type StaleCleanupMode = 'off' | 'dry-run' | 'apply';
+
+export const AUTOPAY_STALE_CLEANUP_MODE_SETTING = 'autopayStaleCleanupMode';
+export const AUTOPAY_STALE_DAYS_SETTING = 'autopayStaleDays';
+
+/** Порог «старое автосписание»: дата списания дальше этого срока в прошлом. */
+export const DEFAULT_STALE_DAYS = 6;
+
+/** Разбирает режим уборки; всё непонятное читается как `dry-run` — он безопасный. */
+export function readStaleCleanupMode(value: unknown, fallback: StaleCleanupMode = 'dry-run'): StaleCleanupMode {
+  const text = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  return text === 'off' || text === 'dry-run' || text === 'apply' ? text : fallback;
+}
+
+/** Сколько дней из настройки; мусор и отрицательные значения — дефолт. */
+export function readStaleDays(value: unknown, fallback: number = DEFAULT_STALE_DAYS): number {
+  const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value.trim()) : NaN;
+  return Number.isFinite(parsed) && parsed >= 1 && parsed <= 365 ? Math.floor(parsed) : fallback;
+}
+
+/** Причина скрытия для ежедневной уборки. */
+export const HIDDEN_REASON_STALE = 'stale_autopay';
+
+/** Причина «лишней» строки: на подписке появилась более новая живая автоподписка. */
+export const SUPERSEDED_BY_NEWER_AUTOPAY = 'superseded: newer live autopay for the same subscription';
+
+/** Причина «лишней» строки: подписку продлили ручной оплатой, а не этим рекуррентом. */
+export function supersededByManualPayment(transactionId: string): string {
+  return `superseded: renewed by manual payment ${transactionId}`;
+}
+
+/**
+ * Отменяет ли провайдер рекуррент в этом статусе.
+ *
+ * Antilopay принимает `payment/recurrent/cancel` для ACTIVE и ACTIVE_FAILED, а
+ * PROCESSING оставляет как есть: запрос проходит, но повторный `check` отдаёт
+ * PROCESSING, и строка висит. Значит для PROCESSING нет смысла дёргать API в
+ * цикле — нужна карточка оператору и ручная отмена в ЛК.
+ */
+export function providerCancelSupported(providerStatus: string | null): boolean {
+  const text = (providerStatus ?? '').trim().toUpperCase();
+  return text === 'ACTIVE' || text === 'ACTIVE_FAILED';
+}
+
+/** Строка ждёт ручной отмены в ЛК провайдера. */
+export function needsManualProviderCancel(providerStatus: string | null): boolean {
+  return (providerStatus ?? '').trim().toUpperCase() === 'PROCESSING';
+}
+

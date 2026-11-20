@@ -44,6 +44,8 @@ export const SEARCH_KEY_TARGETS: Readonly<Record<string, string>> = {
   bulkUsersPage: '/users#bulk',
   blockedIdentitiesPage: '/users#blocked-identities',
   subscriptionsPage: '/subscriptions',
+  // Вкладка «Автосписания» — отдельная страница `/subscriptions/autopay`.
+  autopayPage: '/subscriptions/autopay',
   autoRenewPanel: '/subscriptions',
   duplicateMerge: '/subscriptions',
   // The «Инструменты» sheet of the same page. It opens from `?tools=`, not a

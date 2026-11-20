@@ -4,12 +4,20 @@ import { describe, it } from 'node:test';
 import { ProviderSubscriptionStatus } from '@prisma/client';
 
 import {
+  DEFAULT_STALE_DAYS,
   STALLED_AFTER_MS,
+  SUPERSEDED_BY_NEWER_AUTOPAY,
   autopayHealth,
   cancelBackoffMs,
   isStalledAutopay,
+  needsManualProviderCancel,
+  providerCancelSupported,
   readAutocancelMode,
+  readStaleCleanupMode,
+  readStaleDays,
+  supersededByManualPayment,
 } from '../src/modules/payments/utils/autopay-health.util';
+import { readAutopayFlags } from '../src/modules/payments/utils/autopay-flags.util';
 import { readAntilopayTimestamp } from '../src/modules/payments/utils/antilopay-recurrent.util';
 
 /**
@@ -183,6 +191,79 @@ describe('autopay-health.util', () => {
       assert.equal(readAntilopayTimestamp(''), null);
       assert.equal(readAntilopayTimestamp('not a time'), null);
       assert.equal(readAntilopayTimestamp(undefined), null);
+    });
+  });
+
+  describe('ежедневная уборка и режимы', () => {
+    it('читает режим уборки и всё непонятное считает безопасным dry-run', () => {
+      assert.equal(readStaleCleanupMode('apply'), 'apply');
+      assert.equal(readStaleCleanupMode('off'), 'off');
+      assert.equal(readStaleCleanupMode('dry-run'), 'dry-run');
+      // Опечатка в переменной окружения не должна включать отмены.
+      assert.equal(readStaleCleanupMode('apply!'), 'dry-run');
+      assert.equal(readStaleCleanupMode(undefined), 'dry-run');
+    });
+
+    it('читает порог дней и отбрасывает мусор', () => {
+      assert.equal(readStaleDays('6'), 6);
+      assert.equal(readStaleDays(3, 6), 3);
+      assert.equal(readStaleDays('0'), 6);
+      assert.equal(readStaleDays('-2'), 6);
+      assert.equal(readStaleDays('999'), 6);
+      assert.equal(readStaleDays('abc'), 6);
+    });
+
+    it('флаги по умолчанию ничего не отменяют и ничего не скрывают', () => {
+      const flags = readAutopayFlags({} as NodeJS.ProcessEnv);
+      assert.equal(flags.autocancelMode, 'mark');
+      assert.equal(flags.autocancelOnManualRenew, 'mark');
+      assert.equal(flags.staleCleanupMode, 'dry-run');
+      assert.equal(flags.staleDays, DEFAULT_STALE_DAYS);
+    });
+
+    it('флаги читаются из окружения', () => {
+      const flags = readAutopayFlags({
+        AUTOPAY_AUTOCANCEL_MODE: 'off',
+        AUTOPAY_AUTOCANCEL_ON_MANUAL_RENEW: 'cancel',
+        AUTOPAY_STALE_CLEANUP_MODE: 'apply',
+        AUTOPAY_STALE_DAYS: '10',
+      } as NodeJS.ProcessEnv);
+      assert.deepEqual(flags, {
+        autocancelMode: 'off',
+        autocancelOnManualRenew: 'cancel',
+        staleCleanupMode: 'apply',
+        staleDays: 10,
+      });
+    });
+  });
+
+  describe('что провайдер вообще отменяет', () => {
+    it('ACTIVE и ACTIVE_FAILED отменяются, PROCESSING — нет', () => {
+      assert.equal(providerCancelSupported('ACTIVE'), true);
+      assert.equal(providerCancelSupported('active_failed'), true);
+      assert.equal(providerCancelSupported('PROCESSING'), false);
+      assert.equal(providerCancelSupported('CANCEL'), false);
+      assert.equal(providerCancelSupported(null), false);
+    });
+
+    it('PROCESSING требует ручной отмены в личном кабинете', () => {
+      assert.equal(needsManualProviderCancel('PROCESSING'), true);
+      assert.equal(needsManualProviderCancel('processing'), true);
+      assert.equal(needsManualProviderCancel('ACTIVE'), false);
+      assert.equal(needsManualProviderCancel(null), false);
+    });
+  });
+
+  describe('причины «лишней» строки', () => {
+    it('ручная оплата называет платёж, которым продлили', () => {
+      assert.equal(
+        supersededByManualPayment('tx-42'),
+        'superseded: renewed by manual payment tx-42',
+      );
+    });
+
+    it('более новая автоподписка описана отдельной причиной', () => {
+      assert.match(SUPERSEDED_BY_NEWER_AUTOPAY, /^superseded: newer live autopay/);
     });
   });
 });

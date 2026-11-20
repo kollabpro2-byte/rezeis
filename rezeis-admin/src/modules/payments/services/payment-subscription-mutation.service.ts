@@ -73,6 +73,7 @@ import {
   ADD_ON_NOT_APPLIED_OTHER_NOTICE_TYPE,
 } from '../../notifications/catalog/default-templates.catalog';
 import { UserNotificationsService } from '../../notifications/services/user-notifications.service';
+import { ProviderSubscriptionService } from './provider-subscription.service';
 import { displayPlanName } from '../../plans/utils/plan-deletion.util';
 import { readTrialSettings } from '../../plans/utils/trial-settings.util';
 import {
@@ -272,6 +273,11 @@ export class PaymentSubscriptionMutationService {
      * always injects it; `@Optional()` only for the specs that build this by hand.
      */
     @Optional() private readonly userNotifications?: UserNotificationsService,
+    /**
+     * Правило «ручная оплата отменяет старую автоподписку» (решение владельца
+     * 20.11.2026). `@Optional()` — для спек, которые собирают сервис руками.
+     */
+    @Optional() private readonly autopaySupersede?: ProviderSubscriptionService,
   ) {
     this.entitlementCutoverService =
       entitlementCutoverService ??
@@ -605,6 +611,30 @@ export class PaymentSubscriptionMutationService {
     // reward) now that a plan purchase has completed. Without this it kept
     // applying to every future purchase. The permanent personalDiscount stays.
     await this.consumePurchaseDiscount(transaction.userId, purchasedPlan.id);
+
+    // Правило владельца: подписку продлили ручной оплатой — живая автоподписка
+    // на ней лишняя и спишет ещё раз. Только для RENEW/UPGRADE через чекаут:
+    // списание самой автоподписки помечено ключом `provider-subscription:…`.
+    const isAutopayCharge = (transaction.idempotencyKey ?? '').startsWith('provider-subscription:');
+    if (
+      !isAutopayCharge &&
+      (transaction.purchaseType === PurchaseType.RENEW || transaction.purchaseType === PurchaseType.UPGRADE) &&
+      transaction.subscriptionId !== null
+    ) {
+      await this.autopaySupersede
+        ?.supersedeAfterManualRenewal({
+          subscriptionId: transaction.subscriptionId,
+          transactionId: transaction.id,
+        })
+        .catch((error: unknown) => {
+          // Отмена у провайдера не должна ломать выдачу: деньги и доступ уже
+          // проведены, а строка пометится в следующем sweep.
+          this.logger.warn(
+            `Autopay supersede after manual renewal failed for ${transaction.id}: ` +
+              `${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
+    }
 
     return { syncJobs: [result.syncJob] };
   }

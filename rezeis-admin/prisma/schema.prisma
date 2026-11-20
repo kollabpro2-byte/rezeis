@@ -2774,6 +2774,12 @@ model ProviderSubscription {
   cancelLastError        String?                    @map("cancel_last_error")
   /// Провайдер не отменяет сам (`PROCESSING`) — оператору отменить в ЛК Antilopay.
   manualCancelRequired   Boolean                    @default(false) @map("manual_cancel_required")
+  /// Когда строку скрыли из таблицы (только soft-hide, не DELETE). Скрываем
+  /// старые автосписания после подтверждённой отмены — владелец не хочет их
+  /// видеть; строки остаются для сверки callback'ов и истории попыток.
+  hiddenAt               DateTime?                  @map("hidden_at") @db.Timestamptz(3)
+  /// Почему скрыли: `stale_autopay` (старше порога) и подобные причины.
+  hiddenReason           String?                    @map("hidden_reason")
   createdAt              DateTime                   @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt              DateTime                   @updatedAt @map("updated_at") @db.Timestamptz(3)
 
@@ -2783,6 +2789,10 @@ model ProviderSubscription {
   @@unique([gatewayType, providerRecurrentId], map: "provider_subscriptions_gateway_type_provider_recurrent_id_key")
   @@index([userId, status])
   @@index([status, nextChargeAt])
+  /// Индекс объявлен в миграции `20261120190000_autopay_health_stranded`;
+  /// без этой строки схема и миграции расходятся и CI это ловит.
+  @@index([cancelNextTryAt])
+  @@index([hiddenAt])
   @@map("provider_subscriptions")
 }
 
