@@ -82,7 +82,20 @@ const SERIES = [
  * или мы его погасили. Период — от суток до «за всё время»; график по дням, а
  * на длинных периодах по неделям.
  */
-export function AutopayStats() {
+export function AutopayStats({
+  expected,
+}: {
+  /**
+   * Плановые списания вперёд по живым строкам (сводка страницы). Нужна, чтобы
+   * «ожидается вперёд» стояло рядом с «должно было списаться»: без пары эти
+   * два числа читаются как одно и вызывают вопрос «почему 8 912 против 29 800».
+   */
+  readonly expected?: ReadonlyArray<{
+    readonly currency: string
+    readonly in7d: string
+    readonly in30d: string
+  }>
+}) {
   const { t } = useTranslation()
   const [period, setPeriod] = useState<Period>('30d')
 
@@ -243,7 +256,7 @@ export function AutopayStats() {
                   </p>
                 </div>
 
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
                   <div className="rounded-xl border border-border/60 p-3">
                     <p className="text-xs text-muted-foreground">{t('autopayStats.money.potential')}</p>
                     {data.money.potential.length === 0 ? (
@@ -317,6 +330,27 @@ export function AutopayStats() {
                       {data.money.missedCharges}
                     </p>
                     <p className="mt-1 text-xs text-muted-foreground">{t('autopayStats.money.missedHint')}</p>
+                  </div>
+
+                  {/* Вперёд, а не назад: сумма ближайших плановых списаний по
+                      живым строкам. Стоит рядом с «должно было списаться»,
+                      чтобы разница направлений была видна без пояснений. */}
+                  <div className="rounded-xl border border-border/60 p-3">
+                    <p className="text-xs text-muted-foreground">
+                      {t('autopayStats.money.expectedAhead')}
+                    </p>
+                    {(expected ?? []).length === 0 ? (
+                      <p className="text-lg font-bold tabular-nums">—</p>
+                    ) : (
+                      (expected ?? []).map((row) => (
+                        <p key={row.currency} className="text-lg font-bold tabular-nums text-sky-600">
+                          {formatMoney(row.in30d, row.currency)}
+                        </p>
+                      ))
+                    )}
+                    <p className="text-xs text-muted-foreground">
+                      {t('autopayStats.money.expectedAheadHint')}
+                    </p>
                   </div>
                 </div>
 

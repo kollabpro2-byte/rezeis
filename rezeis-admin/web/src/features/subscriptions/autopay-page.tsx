@@ -288,7 +288,7 @@ export default function AutopayPage() {
         </div>
       </FadeIn>
 
-      <AutopayStats />
+      <AutopayStats expected={summary?.expected} />
 
       <div className="flex items-center gap-3 flex-wrap">
         <Input
