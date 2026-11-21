@@ -363,6 +363,13 @@ export class PaymentSubscriptionMutationService {
           // an upgrade — were still priced with the plan they paid for.
           [...combined.latePlanMigrationRenewals, ...combined.renewalsPricedBeforeUpgrade],
         );
+        // Владелец: ручная оплата гасит автоподписку. Составное продление
+        // (несколько подписок одним платежом) раньше возвращалось отсюда, минуя
+        // хук, — и автоподписка продолжала списывать.
+        await this.cancelSupersededAutopays(
+          transaction,
+          items.map((item) => item.subscriptionId),
+        );
       }
       return { syncJobs: combined.syncJobs };
     }
@@ -624,28 +631,48 @@ export class PaymentSubscriptionMutationService {
     // Правило владельца: подписку продлили ручной оплатой — живая автоподписка
     // на ней лишняя и спишет ещё раз. Только для RENEW/UPGRADE через чекаут:
     // списание самой автоподписки помечено ключом `provider-subscription:…`.
-    const isAutopayCharge = (transaction.idempotencyKey ?? '').startsWith('provider-subscription:');
+    await this.cancelSupersededAutopays(transaction, []);
+
+    return { syncJobs: [result.syncJob] };
+  }
+
+  /**
+   * Гасит автоподписки, которые стали лишними из-за ручной оплаты.
+   *
+   * Зовётся из каждого пути, где деньги клиента реально продлили доступ:
+   * обычное продление, апгрейд и составное продление. Списание самого
+   * рекуррента (`idempotency_key LIKE 'provider-subscription:%'`) сюда не
+   * попадает — это не ручная оплата, и гасить по нему нечего.
+   *
+   * Отмена у провайдера не должна ломать выдачу: деньги и доступ уже проведены,
+   * а строка пометится и погасится следующим проходом sweep.
+   */
+  private async cancelSupersededAutopays(
+    transaction: Transaction,
+    subscriptionIds: readonly (string | null)[],
+  ): Promise<void> {
+    if ((transaction.idempotencyKey ?? '').startsWith('provider-subscription:')) return;
     if (
-      !isAutopayCharge &&
-      (transaction.purchaseType === PurchaseType.RENEW || transaction.purchaseType === PurchaseType.UPGRADE) &&
-      transaction.subscriptionId !== null
+      transaction.purchaseType !== PurchaseType.RENEW &&
+      transaction.purchaseType !== PurchaseType.UPGRADE
     ) {
+      return;
+    }
+    const ids = new Set<string>();
+    if (transaction.subscriptionId !== null) ids.add(transaction.subscriptionId);
+    for (const id of subscriptionIds) if (id !== null) ids.add(id);
+    if (ids.size === 0) return;
+
+    for (const subscriptionId of ids) {
       await this.autopaySupersede
-        ?.supersedeAfterManualRenewal({
-          subscriptionId: transaction.subscriptionId,
-          transactionId: transaction.id,
-        })
+        ?.supersedeAfterManualRenewal({ subscriptionId, transactionId: transaction.id })
         .catch((error: unknown) => {
-          // Отмена у провайдера не должна ломать выдачу: деньги и доступ уже
-          // проведены, а строка пометится в следующем sweep.
           this.logger.warn(
             `Autopay supersede after manual renewal failed for ${transaction.id}: ` +
               `${error instanceof Error ? error.message : String(error)}`,
           );
         });
     }
-
-    return { syncJobs: [result.syncJob] };
   }
 
   /**

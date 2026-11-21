@@ -214,10 +214,13 @@ describe('autopay-health.util', () => {
       assert.equal(readStaleDays('abc'), 6);
     });
 
-    it('флаги по умолчанию ничего не отменяют и ничего не скрывают', () => {
+    it('по умолчанию гасит автоподписку, а уборка остаётся безопасной', () => {
       const flags = readAutopayFlags({} as NodeJS.ProcessEnv);
-      assert.equal(flags.autocancelMode, 'mark');
-      assert.equal(flags.autocancelOnManualRenew, 'mark');
+      // Владелец, 21.11.2026: ручная оплата означает, что клиент про
+      // автоподписку не знает — гасим сразу, без оператора.
+      assert.equal(flags.autocancelMode, 'cancel');
+      assert.equal(flags.autocancelOnManualRenew, 'cancel');
+      // Уборка старых строк по умолчанию ничего не удаляет и не скрывает.
       assert.equal(flags.staleCleanupMode, 'dry-run');
       assert.equal(flags.staleDays, DEFAULT_STALE_DAYS);
     });

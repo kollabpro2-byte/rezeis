@@ -28,8 +28,14 @@ export interface AutopayFlags {
 /** Читает флаги из окружения; мусор в переменной даёт значение по умолчанию. */
 export function readAutopayFlags(env: NodeJS.ProcessEnv = process.env): AutopayFlags {
   return {
-    autocancelMode: readAutocancelMode(env['AUTOPAY_AUTOCANCEL_MODE'] ?? null),
-    autocancelOnManualRenew: readAutocancelMode(env['AUTOPAY_AUTOCANCEL_ON_MANUAL_RENEW'] ?? null),
+    // Владелец, 21.11.2026: ручная оплата означает, что клиент про автоподписку
+    // не знает и платит сам — гасим её сразу, не дожидаясь оператора. Поэтому
+    // по умолчанию `cancel`; `mark` и `off` остаются как ручной откат.
+    autocancelMode: readAutocancelMode(env['AUTOPAY_AUTOCANCEL_MODE'] ?? null, 'cancel'),
+    autocancelOnManualRenew: readAutocancelMode(
+      env['AUTOPAY_AUTOCANCEL_ON_MANUAL_RENEW'] ?? null,
+      'cancel',
+    ),
     staleCleanupMode: readStaleCleanupMode(env['AUTOPAY_STALE_CLEANUP_MODE'] ?? null),
     staleDays: readStaleDays(env['AUTOPAY_STALE_DAYS'] ?? null),
   };

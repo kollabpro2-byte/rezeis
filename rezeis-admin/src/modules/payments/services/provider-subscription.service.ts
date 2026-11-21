@@ -63,6 +63,7 @@ import {
   needsManualProviderCancel,
   providerCancelSupported,
   SUPERSEDED_BY_NEWER_AUTOPAY,
+  SUPERSEDED_RENEWED_PREFIX,
   supersededByManualPayment,
 } from '../utils/autopay-health.util';
 import {
@@ -3069,7 +3070,8 @@ export class ProviderSubscriptionService {
    * заплачено больше, чем даёт одно списание этой строки.
    */
   public async supersedeRenewedElsewhere(now = new Date()): Promise<{ marked: number; cancelled: number }> {
-    const mode = readAutopayFlags().autocancelMode;
+    // Это про ручную оплату, поэтому флаг — тот же, что у хука после продления.
+    const mode = readAutopayFlags().autocancelOnManualRenew;
     const result = { marked: 0, cancelled: 0 };
     if (mode === 'off') return result;
 
@@ -3079,32 +3081,83 @@ export class ProviderSubscriptionService {
         hiddenAt: null,
         subscriptionId: { not: null },
       },
-      select: { id: true, subscriptionId: true, nextChargeAt: true, durationDays: true, strandedReason: true },
+      select: {
+        id: true,
+        subscriptionId: true,
+        nextChargeAt: true,
+        durationDays: true,
+        strandedReason: true,
+        lastChargeAt: true,
+        createdAt: true,
+      },
       take: 500,
     });
     const ids = [...new Set(rows.flatMap((row) => (row.subscriptionId === null ? [] : [row.subscriptionId])))];
-    const subscriptions =
-      ids.length === 0
-        ? []
-        : await this.prismaService.subscription.findMany({
-            where: { id: { in: ids } },
-            select: { id: true, expiresAt: true },
-          });
+    if (ids.length === 0) return result;
+
+    const [subscriptions, manualPayments] = await Promise.all([
+      this.prismaService.subscription.findMany({
+        where: { id: { in: ids } },
+        select: { id: true, expiresAt: true },
+      }),
+      // Ручные продления этих подписок: у них ключ НЕ `provider-subscription:…`,
+      // то есть деньги внёс клиент, а не рекуррент.
+      this.prismaService.transaction.findMany({
+        where: {
+          subscriptionId: { in: ids },
+          status: TransactionStatus.COMPLETED,
+          purchaseType: { in: [PurchaseType.RENEW, PurchaseType.UPGRADE] },
+        },
+        orderBy: { createdAt: 'asc' },
+        select: { id: true, subscriptionId: true, createdAt: true, idempotencyKey: true },
+      }),
+    ]);
     const expiresById = new Map(subscriptions.map((row) => [row.id, row.expiresAt] as const));
+    const lastManualBySubscription = new Map<string, { readonly id: string; readonly createdAt: Date }>();
+    for (const payment of manualPayments) {
+      if (payment.subscriptionId === null) continue;
+      if ((payment.idempotencyKey ?? '').startsWith('provider-subscription:')) continue;
+      lastManualBySubscription.set(payment.subscriptionId, {
+        id: payment.id,
+        createdAt: payment.createdAt,
+      });
+    }
 
     for (const row of rows) {
       if (row.subscriptionId === null) continue;
-      const expiresAt = expiresById.get(row.subscriptionId) ?? null;
-      if (expiresAt === null) continue;
-      // Отсчёт от даты списания, а если она в прошлом — от сегодняшнего дня.
-      const base = row.nextChargeAt === null || row.nextChargeAt.getTime() < now.getTime()
-        ? now
-        : row.nextChargeAt;
-      const coveredUntil = new Date(base.getTime() + row.durationDays * DAY_MS);
-      if (expiresAt.getTime() <= coveredUntil.getTime() + DAY_MS) continue;
+      // Строка уже помечена «продлено не этим рекуррентом» (хук после ручной
+      // оплаты или прошлый проход): гасим её, не пересчитывая срок.
+      const alreadyMarked = (row.strandedReason ?? '').startsWith(SUPERSEDED_RENEWED_PREFIX);
+      // Ручная оплата после последнего списания автоподписки — тот самый случай
+      // владельца: клиент платит сам, значит про автосписание он не знает и не
+      // рассчитывает на него. Это ловит и те продления, где хук не сработал
+      // (например, составное продление до этой правки).
+      const manual = lastManualBySubscription.get(row.subscriptionId);
+      const since = row.lastChargeAt ?? row.createdAt;
+      const manualAfter = manual !== undefined && manual.createdAt.getTime() > since.getTime();
 
-      const reason = `superseded: renewed by another payment (access until ${expiresAt.toISOString().slice(0, 10)})`;
-      // Уже помечено этим же — не пишем повторно каждые десять минут.
+      let reason: string | null = null;
+      if (alreadyMarked) {
+        reason = row.strandedReason;
+      } else if (manualAfter) {
+        reason = supersededByManualPayment(manual.id);
+      } else {
+        // Запасной признак без опоры на транзакции: доступ продлён дальше, чем
+        // на один период вперёд от даты списания.
+        const expiresAt = expiresById.get(row.subscriptionId) ?? null;
+        if (expiresAt !== null) {
+          const base =
+            row.nextChargeAt === null || row.nextChargeAt.getTime() < now.getTime()
+              ? now
+              : row.nextChargeAt;
+          const coveredUntil = new Date(base.getTime() + row.durationDays * DAY_MS);
+          if (expiresAt.getTime() > coveredUntil.getTime() + DAY_MS) {
+            reason = `${SUPERSEDED_RENEWED_PREFIX} another payment (access until ${expiresAt.toISOString().slice(0, 10)})`;
+          }
+        }
+      }
+      if (reason === null) continue;
+
       if (row.strandedReason !== reason) {
         await this.prismaService.providerSubscription.updateMany({
           where: { id: row.id },
@@ -3114,7 +3167,8 @@ export class ProviderSubscriptionService {
         await this.writeSystemAudit('payments.autopay.superseded_renewed_elsewhere', {
           rowId: row.id,
           subscriptionId: row.subscriptionId,
-          expiresAt: expiresAt.toISOString(),
+          manualTransactionId: manualAfter ? manual.id : null,
+          reason,
           mode,
         });
       }
