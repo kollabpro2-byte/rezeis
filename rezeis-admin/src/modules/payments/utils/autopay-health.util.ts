@@ -129,9 +129,16 @@ export const HIDDEN_REASON_MANUAL_CABINET = 'manual_cancel_in_cabinet';
 /** Причина «лишней» строки: на подписке появилась более новая живая автоподписка. */
 export const SUPERSEDED_BY_NEWER_AUTOPAY = 'superseded: newer live autopay for the same subscription';
 
+/**
+ * Общий префикс причин «продлено не этим рекуррентом»: и ручная оплата, и
+ * другой платёж. По нему статистика отличает «лишние» строки от прочих
+ * (`subscription deleted`, `account blocked` и т.п.).
+ */
+export const SUPERSEDED_RENEWED_PREFIX = 'superseded: renewed by';
+
 /** Причина «лишней» строки: подписку продлили ручной оплатой, а не этим рекуррентом. */
 export function supersededByManualPayment(transactionId: string): string {
-  return `superseded: renewed by manual payment ${transactionId}`;
+  return `${SUPERSEDED_RENEWED_PREFIX} manual payment ${transactionId}`;
 }
 
 /**

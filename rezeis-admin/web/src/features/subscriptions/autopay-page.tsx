@@ -30,6 +30,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { FadeIn } from '@/lib/motion'
 import { PageTitle } from '@/components/layout/page-title'
 import { PermissionGate, useHasPermission } from '@/features/rbac'
+import { AutopayStats } from './autopay-stats'
 
 /** Одна попытка автосписания, как её хранит `provider_subscriptions.attempts`. */
 interface AutopayAttempt {
@@ -286,6 +287,8 @@ export default function AutopayPage() {
           </Button>
         </div>
       </FadeIn>
+
+      <AutopayStats />
 
       <div className="flex items-center gap-3 flex-wrap">
         <Input

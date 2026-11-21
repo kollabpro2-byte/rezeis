@@ -46,6 +46,8 @@ export const SEARCH_KEY_TARGETS: Readonly<Record<string, string>> = {
   subscriptionsPage: '/subscriptions',
   // Вкладка «Автосписания» — отдельная страница `/subscriptions/autopay`.
   autopayPage: '/subscriptions/autopay',
+  // Её блок статистики живёт на той же странице.
+  autopayStats: '/subscriptions/autopay',
   autoRenewPanel: '/subscriptions',
   duplicateMerge: '/subscriptions',
   // The «Инструменты» sheet of the same page. It opens from `?tools=`, not a

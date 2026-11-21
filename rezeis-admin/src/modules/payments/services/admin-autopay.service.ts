@@ -14,7 +14,14 @@ import {
   readAutopayAttempts,
   summariseAutopayAttempts,
 } from '../utils/autopay-log.util';
-import { type AutopayHealth, autopayHealth, STALLED_AFTER_MS } from '../utils/autopay-health.util';
+import { type AutopayHealth, autopayHealth, STALLED_AFTER_MS, SUPERSEDED_RENEWED_PREFIX } from '../utils/autopay-health.util';
+import {
+  type AutopayStatsPeriod,
+  bucketStart,
+  readStatsPeriod,
+  statsBucketMs,
+  statsRange,
+} from '../utils/autopay-stats.util';
 import { AFTER_RESPONSE_SHUTDOWN_WAIT_MS } from './payment-reconciliation.service';
 import { OperatorProviderSubscriptionInterface, ProviderSubscriptionService } from './provider-subscription.service';
 import { SavedPaymentMethodService, SwitchedOffMethod } from './saved-payment-method.service';
@@ -122,7 +129,38 @@ export interface AdminAutopayRowInterface {
   readonly hiddenReason: string | null;
 }
 
-/** Сводка вкладки: статусы, здоровье и ожидаемые списания. */
+/** Сводка по одному срезу статистики: три категории автопродлений. */
+export interface AutopayStatsBreakdownInterface {
+  /** Автопродление сработало: деньги списаны, срок продлён. */
+  readonly autopayRenewed: number;
+  /** Клиент продлил вручную, автопродление осталось живым — требует внимания. */
+  readonly manualSupersededLive: number;
+  /** Клиент продлил вручную, и мы погасили автопродление из-за этого. */
+  readonly manualSupersededCancelled: number;
+}
+
+/** Статистика автопродлений за период: итоги, разрезы и точки для графика. */
+export interface AdminAutopayStatsInterface {
+  readonly period: AutopayStatsPeriod;
+  /** `null` у «за всё время». */
+  readonly from: string | null;
+  readonly to: string;
+  /** Шаг графика в днях: 1 или 7. */
+  readonly bucketDays: number;
+  readonly totals: AutopayStatsBreakdownInterface;
+  readonly byGateway: ReadonlyArray<AutopayStatsBreakdownInterface & { readonly gatewayType: PaymentGatewayType }>;
+  readonly series: ReadonlyArray<AutopayStatsBreakdownInterface & { readonly bucket: string }>;
+}
+
+/** Пустой срез: так удобно складывать счётчики. */
+function emptyBreakdown(): {
+  autopayRenewed: number;
+  manualSupersededLive: number;
+  manualSupersededCancelled: number;
+} {
+  return { autopayRenewed: 0, manualSupersededLive: 0, manualSupersededCancelled: 0 };
+}
+
 export interface AdminAutopaySummaryInterface {
   readonly byStatus: Readonly<Record<string, number>>;
   readonly byHealth: Readonly<Record<string, number>>;
@@ -652,6 +690,105 @@ export class AdminAutopayService implements OnModuleDestroy {
       );
     }
     return lines.join('\r\n');
+  }
+
+  /**
+   * Статистика автопродлений за период.
+   *
+   * Три категории, ради которых оператор сюда заходит:
+   *  • автопродление сработало — деньги списаны и срок продлён;
+   *  • клиент продлил вручную, а автопродление осталось живым — оно спишет
+   *    ещё раз, если его не погасить (это и есть «зависло»);
+   *  • клиент продлил вручную, и мы погасили автопродление из-за этого.
+   *
+   * Первая считается по транзакциям самого рекуррента
+   * (`idempotency_key LIKE 'provider-subscription:%'`), две другие — по
+   * отметке `stranded_reason = 'superseded: renewed by …'`, которую ставит
+   * `supersedeAfterManualRenewal`/`supersedeRenewedElsewhere`, с разделением
+   * по нашему статусу строки: `CANCELLED` — погасили, живой — осталось.
+   */
+  public async statistics(input: { readonly period?: string; readonly now?: Date } = {}): Promise<AdminAutopayStatsInterface> {
+    const now = input.now ?? new Date();
+    const period = readStatsPeriod(input.period);
+    const range = statsRange(period, now);
+    const bucketMs = statsBucketMs(range);
+    const inRange = range.from === null ? {} : { gte: range.from, lte: range.to };
+
+    const [renewed, superseded] = await Promise.all([
+      this.prismaService.transaction.findMany({
+        where: {
+          status: 'COMPLETED',
+          idempotencyKey: { startsWith: 'provider-subscription:' },
+          ...(range.from === null ? {} : { createdAt: inRange }),
+        },
+        select: { createdAt: true, gatewayType: true },
+      }),
+      this.prismaService.providerSubscription.findMany({
+        where: {
+          strandedReason: { startsWith: SUPERSEDED_RENEWED_PREFIX },
+          ...(range.from === null ? {} : { strandedAt: inRange }),
+        },
+        select: { status: true, strandedAt: true, gatewayType: true },
+      }),
+    ]);
+
+    const totals = emptyBreakdown();
+    const byGateway = new Map<PaymentGatewayType, ReturnType<typeof emptyBreakdown>>();
+    const series = new Map<number, ReturnType<typeof emptyBreakdown>>();
+
+    const earliest = Math.min(
+      ...renewed.map((row) => row.createdAt.getTime()),
+      ...superseded.map((row) => row.strandedAt?.getTime() ?? Number.POSITIVE_INFINITY),
+    );
+    // Пустые бакеты нужны графику: без них «тихие» дни выглядели бы слипшимися.
+    const startMs = Number.isFinite(earliest)
+      ? Math.min(earliest, range.from?.getTime() ?? earliest)
+      : (range.from?.getTime() ?? now.getTime());
+    for (let t = bucketStart(new Date(startMs), bucketMs).getTime(); t <= now.getTime(); t += bucketMs) {
+      series.set(t, emptyBreakdown());
+    }
+
+    const bump = (
+      bucket: ReturnType<typeof emptyBreakdown> | undefined,
+      kind: keyof AutopayStatsBreakdownInterface,
+      gatewayType: PaymentGatewayType,
+      at: Date,
+    ): void => {
+      if (bucket !== undefined) bucket[kind] += 1;
+      const forGateway = byGateway.get(gatewayType) ?? emptyBreakdown();
+      forGateway[kind] += 1;
+      byGateway.set(gatewayType, forGateway);
+      const key = bucketStart(at, bucketMs).getTime();
+      const point = series.get(key);
+      if (point !== undefined) point[kind] += 1;
+    };
+
+    for (const row of renewed) {
+      bump(totals, 'autopayRenewed', row.gatewayType, row.createdAt);
+    }
+    for (const row of superseded) {
+      const at = row.strandedAt ?? now;
+      bump(
+        totals,
+        row.status === ProviderSubscriptionStatus.CANCELLED
+          ? 'manualSupersededCancelled'
+          : 'manualSupersededLive',
+        row.gatewayType,
+        at,
+      );
+    }
+
+    return {
+      period,
+      from: range.from?.toISOString() ?? null,
+      to: range.to.toISOString(),
+      bucketDays: bucketMs / (24 * 60 * 60 * 1000),
+      totals,
+      byGateway: [...byGateway.entries()].map(([gatewayType, value]) => ({ gatewayType, ...value })),
+      series: [...series.entries()]
+        .sort((left, right) => left[0] - right[0])
+        .map(([at, value]) => ({ bucket: new Date(at).toISOString(), ...value })),
+    };
   }
 
   /**

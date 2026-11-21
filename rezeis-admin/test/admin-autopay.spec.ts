@@ -214,6 +214,7 @@ describe('AdminPaymentAutopayController', () => {
       'cancelById',
       'exportCsv',
       'markCancelledInCabinet',
+      'stats',
     ]);
 
     const list = routeLabel(BASE_PATH, RequestMethod.GET, 'users/:userId');
@@ -232,6 +233,11 @@ describe('AdminPaymentAutopayController', () => {
     const exportCsv = routeLabel(BASE_PATH, RequestMethod.GET, 'export.csv');
     assertRoute(AdminPaymentAutopayController.prototype.exportCsv, { method: RequestMethod.GET, path: 'export.csv' }, exportCsv);
     assertRoutePermission(AdminPaymentAutopayController.prototype.exportCsv, { resource: 'payments', action: 'view' }, exportCsv);
+
+    // Статистика автопродлений: те же данные, что в таблице, только счётчиками.
+    const stats = routeLabel(BASE_PATH, RequestMethod.GET, 'stats');
+    assertRoute(AdminPaymentAutopayController.prototype.stats, { method: RequestMethod.GET, path: 'stats' }, stats);
+    assertRoutePermission(AdminPaymentAutopayController.prototype.stats, { resource: 'payments', action: 'view' }, stats);
 
     const cancelById = routeLabel(BASE_PATH, RequestMethod.POST, ':providerSubscriptionRowId/cancel');
     assertRoute(AdminPaymentAutopayController.prototype.cancelById, { method: RequestMethod.POST, path: ':providerSubscriptionRowId/cancel' }, cancelById);

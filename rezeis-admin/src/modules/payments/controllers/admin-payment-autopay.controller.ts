@@ -11,6 +11,7 @@ import { RbacGuard } from '../../rbac/guards/rbac.guard';
 import {
   AdminAutopayListInterface,
   AdminAutopayService,
+  AdminAutopayStatsInterface,
   AdminAutopaySummaryInterface,
   AdminProviderAutopayCancelResultInterface,
   AdminUserAutopayInterface,
@@ -54,6 +55,18 @@ export class AdminPaymentAutopayController {
   @RequirePermission('payments', 'view')
   public async summary(): Promise<AdminAutopaySummaryInterface> {
     return this.adminAutopayService.summarise();
+  }
+
+  /**
+   * Статистика автопродлений: автопродление сработало / клиент продлил вручную
+   * и автопродление живо / клиент продлил вручную и мы его погасили.
+   * `period` — `all`, `day`, `3d`, `7d`, `14d`, `30d`, `90d`, `180d`, `365d`.
+   */
+  @Get('stats')
+  @ApiOperation({ summary: 'Статистика автопродлений за период' })
+  @RequirePermission('payments', 'view')
+  public async stats(@Query() query: AdminAutopayListQueryDto): Promise<AdminAutopayStatsInterface> {
+    return this.adminAutopayService.statistics({ period: query.period });
   }
 
   /**

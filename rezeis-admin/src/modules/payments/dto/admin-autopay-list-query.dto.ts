@@ -95,6 +95,15 @@ export class AdminAutopayListQueryDto {
   @Type(() => Boolean)
   public readonly csv?: boolean;
 
+  @ApiPropertyOptional({
+    enum: ['all', 'day', '3d', '7d', '14d', '30d', '90d', '180d', '365d'],
+    description: 'Период статистики; по умолчанию месяц',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(8)
+  public readonly period?: string;
+
   @ApiPropertyOptional({ default: 50, maximum: 200 })
   @IsOptional()
   @Type(() => Number)
