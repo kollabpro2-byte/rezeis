@@ -3,10 +3,14 @@ import { describe, it } from 'node:test';
 
 import {
   AUTOPAY_STATS_PERIODS,
+  accumulateMoney,
   bucketStart,
+  fromMinorUnits,
   readStatsPeriod,
+  sharePercent,
   statsBucketMs,
   statsRange,
+  toMinorUnits,
 } from '../src/modules/payments/utils/autopay-stats.util';
 
 /**
@@ -18,6 +22,8 @@ import {
  */
 const NOW = new Date('2026-11-21T12:00:00.000Z');
 const DAY = 24 * 60 * 60 * 1000;
+/** ISO-строка без «Z»-возни: попытки в базе хранят именно `toISOString()`. */
+const at = (iso: string): string => new Date(iso).toISOString();
 
 describe('autopay-stats.util', () => {
   describe('readStatsPeriod', () => {
@@ -81,6 +87,112 @@ describe('autopay-stats.util', () => {
     });
   });
 
+  describe('проценты и деньги', () => {
+    it('переводит суммы в копейки и обратно без потерь', () => {
+      assert.equal(toMinorUnits('299.00'), 29_900);
+      assert.equal(toMinorUnits('299,5'), 29_950);
+      assert.equal(toMinorUnits('не число'), 0);
+      assert.equal(fromMinorUnits(29_900), '299.00');
+      assert.equal(fromMinorUnits(29_950), '299.50');
+    });
+
+    it('считает долю с одним знаком и не делит на ноль', () => {
+      assert.equal(sharePercent(1, 3), 33.3);
+      assert.equal(sharePercent(2, 3), 66.7);
+      assert.equal(sharePercent(0, 0), 0);
+      // Симметрия: успех + ошибки = 100.
+      assert.equal(sharePercent(1, 3) + sharePercent(2, 3), 100);
+    });
+  });
+
+  describe('accumulateMoney', () => {
+    const range = statsRange('30d', NOW);
+
+    it('суммирует потенциал и полученное по валютам, считая только попытки в периоде', () => {
+      const rows = [
+        {
+          amount: '299.00',
+          currency: 'RUB',
+          createdAt: new Date('2026-11-01T10:00:00Z'),
+          attempts: [
+            // В периоде: успешная и неуспешная.
+            { at: at('2026-11-10T10:00:00Z'), ok: true, amount: '299.00' },
+            { at: at('2026-11-15T10:00:00Z'), ok: false, error: 'ACTIVE_FAILED' },
+            // Вне периода (старая) — не считаем.
+            { at: at('2026-08-15T10:00:00Z'), ok: true, amount: '299.00' },
+          ],
+        },
+        {
+          amount: '19.90',
+          currency: 'USD',
+          createdAt: new Date('2026-11-05T10:00:00Z'),
+          attempts: [{ at: at('2026-11-12T10:00:00Z'), ok: true, amount: '19.90' }],
+        },
+      ];
+
+      const totals = accumulateMoney({ rows, range });
+
+      assert.equal(totals.issued, 2);
+      assert.equal(totals.expectedCharges, 3);
+      assert.equal(totals.succeededCharges, 2);
+      assert.equal(totals.failedCharges, 1);
+      assert.deepEqual(totals.byCurrency.get('RUB'), { potentialCents: 59_800, receivedCents: 29_900 });
+      assert.deepEqual(totals.byCurrency.get('USD'), { potentialCents: 1_990, receivedCents: 1_990 });
+    });
+
+    it('для неуспешной попытки планирует сумму строки, для успешной — сумму из попытки', () => {
+      const rows = [
+        {
+          amount: '300.00',
+          currency: 'RUB',
+          createdAt: new Date('2026-11-05T10:00:00Z'),
+          attempts: [
+            // Провайдер списал по старой цене — берём его слово.
+            { at: at('2026-11-10T10:00:00Z'), ok: true, amount: '250.00' },
+            { at: at('2026-11-15T10:00:00Z'), ok: false, error: 'FAIL' },
+          ],
+        },
+      ];
+
+      const totals = accumulateMoney({ rows, range });
+
+      // 250 (получено) + 300 (планировалось к неуспешной) = 550 потенциала.
+      assert.deepEqual(totals.byCurrency.get('RUB'), { potentialCents: 55_000, receivedCents: 25_000 });
+      assert.equal(totals.succeededCharges, 1);
+      assert.equal(totals.failedCharges, 1);
+    });
+
+    it('«за всё время» учитывает и старые попытки', () => {
+      const rows = [
+        {
+          amount: '100.00',
+          currency: 'RUB',
+          createdAt: new Date('2025-01-01T10:00:00Z'),
+          attempts: [{ at: at('2025-02-01T10:00:00Z'), ok: true, amount: '100.00' }],
+        },
+      ];
+      const all = accumulateMoney({ rows, range: statsRange('all', NOW) });
+      assert.equal(all.expectedCharges, 1);
+      assert.equal(all.issued, 1);
+      const month = accumulateMoney({ rows, range });
+      assert.equal(month.expectedCharges, 0);
+      assert.equal(month.issued, 0);
+    });
+
+    it('битые попытки не ломают итог', () => {
+      const rows = [
+        {
+          amount: '100.00',
+          currency: 'RUB',
+          createdAt: new Date('2026-11-05T10:00:00Z'),
+          attempts: [{ at: 'not a date', ok: true }, { ok: true }],
+        },
+      ];
+      const totals = accumulateMoney({ rows, range });
+      assert.equal(totals.expectedCharges, 0);
+      assert.deepEqual(totals.byCurrency.get('RUB'), { potentialCents: 0, receivedCents: 0 });
+    });
+  });
   describe('bucketStart', () => {
     it('округляет вниз до суток', () => {
       assert.equal(

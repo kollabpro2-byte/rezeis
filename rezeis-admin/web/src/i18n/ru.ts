@@ -4607,6 +4607,18 @@ export const ru = {
       '180d': 'Полгода',
       '365d': 'Год',
     },
+    money: {
+      title: 'Деньги и качество списаний',
+      issued: 'Оформлено автосписаний: {{count}}',
+      potential: 'Потенциал',
+      potentialHint: 'Все ожидаемые списания',
+      received: 'Получено',
+      receivedHint: 'Фактически списано',
+      successRate: 'Успешных оплат',
+      errorRate: 'Ошибок списания',
+      ofExpected: 'из {{count}} ожидаемых',
+      failedOfExpected: 'не прошло {{count}} из {{expected}}',
+    },
   },
 
   autopayPage: {

@@ -16,9 +16,14 @@ import {
 } from '../utils/autopay-log.util';
 import { type AutopayHealth, autopayHealth, STALLED_AFTER_MS, SUPERSEDED_RENEWED_PREFIX } from '../utils/autopay-health.util';
 import {
+  type AutopayMoneyStatsInterface,
   type AutopayStatsPeriod,
+  type AutopayStatsRange,
+  accumulateMoney,
   bucketStart,
+  fromMinorUnits,
   readStatsPeriod,
+  sharePercent,
   statsBucketMs,
   statsRange,
 } from '../utils/autopay-stats.util';
@@ -150,6 +155,8 @@ export interface AdminAutopayStatsInterface {
   readonly totals: AutopayStatsBreakdownInterface;
   readonly byGateway: ReadonlyArray<AutopayStatsBreakdownInterface & { readonly gatewayType: PaymentGatewayType }>;
   readonly series: ReadonlyArray<AutopayStatsBreakdownInterface & { readonly bucket: string }>;
+  /** Деньги и качество списаний за тот же период. */
+  readonly money: AutopayMoneyStatsInterface;
 }
 
 /** Пустой срез: так удобно складывать счётчики. */
@@ -714,7 +721,7 @@ export class AdminAutopayService implements OnModuleDestroy {
     const bucketMs = statsBucketMs(range);
     const inRange = range.from === null ? {} : { gte: range.from, lte: range.to };
 
-    const [renewed, superseded] = await Promise.all([
+    const [renewed, superseded, moneyRows] = await Promise.all([
       this.prismaService.transaction.findMany({
         where: {
           status: 'COMPLETED',
@@ -729,6 +736,11 @@ export class AdminAutopayService implements OnModuleDestroy {
           ...(range.from === null ? {} : { strandedAt: inRange }),
         },
         select: { status: true, strandedAt: true, gatewayType: true },
+      }),
+      // Деньги считаются по истории попыток: каждая попытка — это плановое
+      // списание, поэтому успешные и неуспешные берутся из одной базы.
+      this.prismaService.providerSubscription.findMany({
+        select: { amount: true, currency: true, createdAt: true, attempts: true },
       }),
     ]);
 
@@ -788,6 +800,45 @@ export class AdminAutopayService implements OnModuleDestroy {
       series: [...series.entries()]
         .sort((left, right) => left[0] - right[0])
         .map(([at, value]) => ({ bucket: new Date(at).toISOString(), ...value })),
+      money: this.moneyStats(moneyRows, range),
+    };
+  }
+
+  /** Деньги и качество списаний для {@link statistics}: суммы по валютам и проценты. */
+  private moneyStats(
+    rows: ReadonlyArray<{
+      readonly amount: { toString(): string };
+      readonly currency: string;
+      readonly createdAt: Date;
+      readonly attempts: unknown;
+    }>,
+    range: AutopayStatsRange,
+  ): AutopayMoneyStatsInterface {
+    const totals = accumulateMoney({
+      rows: rows.map((row) => ({
+        amount: row.amount.toString(),
+        currency: row.currency,
+        createdAt: row.createdAt,
+        attempts: row.attempts,
+      })),
+      range,
+    });
+    const currencies = [...totals.byCurrency.entries()].sort((left, right) => left[0].localeCompare(right[0]));
+    return {
+      issued: totals.issued,
+      expectedCharges: totals.expectedCharges,
+      succeededCharges: totals.succeededCharges,
+      failedCharges: totals.failedCharges,
+      successRate: sharePercent(totals.succeededCharges, totals.expectedCharges),
+      errorRate: sharePercent(totals.failedCharges, totals.expectedCharges),
+      potential: currencies.map(([currency, value]) => ({
+        currency,
+        amount: fromMinorUnits(value.potentialCents),
+      })),
+      received: currencies.map(([currency, value]) => ({
+        currency,
+        amount: fromMinorUnits(value.receivedCents),
+      })),
     };
   }
 

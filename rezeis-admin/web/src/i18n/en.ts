@@ -4482,6 +4482,18 @@ export const en = {
       '180d': '6 months',
       '365d': 'Year',
     },
+    money: {
+      title: 'Money and charge quality',
+      issued: 'Autopays issued: {{count}}',
+      potential: 'Potential',
+      potentialHint: 'All expected charges',
+      received: 'Received',
+      receivedHint: 'Actually charged',
+      successRate: 'Successful charges',
+      errorRate: 'Charge errors',
+      ofExpected: 'of {{count}} expected',
+      failedOfExpected: '{{count}} of {{expected}} failed',
+    },
   },
 
   autopayPage: {

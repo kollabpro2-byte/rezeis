@@ -25,6 +25,19 @@ interface Breakdown {
   readonly manualSupersededCancelled: number
 }
 
+/** Деньги и качество списаний за тот же период. */
+interface MoneyStats {
+  /** Сколько автосписаний оформлено за период. */
+  readonly issued: number
+  readonly expectedCharges: number
+  readonly succeededCharges: number
+  readonly failedCharges: number
+  readonly successRate: number
+  readonly errorRate: number
+  readonly potential: ReadonlyArray<{ readonly currency: string; readonly amount: string }>
+  readonly received: ReadonlyArray<{ readonly currency: string; readonly amount: string }>
+}
+
 interface StatsPayload extends Breakdown {
   readonly period: Period
   readonly from: string | null
@@ -33,6 +46,22 @@ interface StatsPayload extends Breakdown {
   readonly totals: Breakdown
   readonly byGateway: ReadonlyArray<Breakdown & { readonly gatewayType: string }>
   readonly series: ReadonlyArray<Breakdown & { readonly bucket: string }>
+  readonly money: MoneyStats
+}
+
+/** Сумма в валюте: `Intl` знает, где ставить символ, а где код. */
+function formatMoney(amount: string, currency: string): string {
+  const value = Number.parseFloat(amount)
+  if (!Number.isFinite(value)) return `${amount} ${currency}`
+  try {
+    return new Intl.NumberFormat(activeLocale(), {
+      style: 'currency',
+      currency,
+      maximumFractionDigits: 2,
+    }).format(value)
+  } catch {
+    return `${amount} ${currency}`
+  }
 }
 
 /** Цвета серий: зелёный — сработало, янтарный — требует внимания, синий — погашено. */
@@ -203,6 +232,82 @@ export function AutopayStats() {
             </div>
 
             {isEmpty && <p className="text-center text-sm text-muted-foreground">{t('autopayStats.empty')}</p>}
+
+            {data !== undefined && (
+              <div className="space-y-3 border-t border-border/60 pt-4">
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <p className="font-semibold">{t('autopayStats.money.title')}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {t('autopayStats.money.issued', { count: data.money.issued })}
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                  <div className="rounded-xl border border-border/60 p-3">
+                    <p className="text-xs text-muted-foreground">{t('autopayStats.money.potential')}</p>
+                    {data.money.potential.length === 0 ? (
+                      <p className="text-lg font-bold tabular-nums">—</p>
+                    ) : (
+                      data.money.potential.map((row) => (
+                        <p key={row.currency} className="text-lg font-bold tabular-nums">
+                          {formatMoney(row.amount, row.currency)}
+                        </p>
+                      ))
+                    )}
+                    <p className="text-xs text-muted-foreground">{t('autopayStats.money.potentialHint')}</p>
+                  </div>
+
+                  <div className="rounded-xl border border-border/60 p-3">
+                    <p className="text-xs text-muted-foreground">{t('autopayStats.money.received')}</p>
+                    {data.money.received.length === 0 ? (
+                      <p className="text-lg font-bold tabular-nums">—</p>
+                    ) : (
+                      data.money.received.map((row) => (
+                        <p key={row.currency} className="text-lg font-bold tabular-nums text-emerald-600">
+                          {formatMoney(row.amount, row.currency)}
+                        </p>
+                      ))
+                    )}
+                    <p className="text-xs text-muted-foreground">{t('autopayStats.money.receivedHint')}</p>
+                  </div>
+
+                  <div className="rounded-xl border border-border/60 p-3">
+                    <p className="text-xs text-muted-foreground">{t('autopayStats.money.successRate')}</p>
+                    <p className="text-2xl font-bold tabular-nums text-emerald-600">
+                      {data.money.successRate.toFixed(1)}%
+                    </p>
+                    <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                      <div
+                        className="h-full rounded-full bg-emerald-500"
+                        style={{ width: `${Math.min(100, data.money.successRate)}%` }}
+                      />
+                    </div>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {t('autopayStats.money.ofExpected', { count: data.money.expectedCharges })}
+                    </p>
+                  </div>
+
+                  <div className="rounded-xl border border-border/60 p-3">
+                    <p className="text-xs text-muted-foreground">{t('autopayStats.money.errorRate')}</p>
+                    <p className="text-2xl font-bold tabular-nums text-destructive">
+                      {data.money.errorRate.toFixed(1)}%
+                    </p>
+                    <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                      <div
+                        className="h-full rounded-full bg-destructive"
+                        style={{ width: `${Math.min(100, data.money.errorRate)}%` }}
+                      />
+                    </div>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {t('autopayStats.money.failedOfExpected', {
+                        count: data.money.failedCharges,
+                        expected: data.money.expectedCharges,
+                      })}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
           </>
         )}
       </CardContent>
