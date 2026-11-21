@@ -70,9 +70,16 @@ on:
 
 permissions:
   contents: read
+  # Свой пакет панели в GHCR приватный по умолчанию: анонимный pull отвечает
+  # `denied`, поэтому тянем под токеном рабочего процесса.
+  packages: read
 
 env:
-  PANEL_REPOSITORY: ghcr.io/dizzzable/rezeis
+  # Образ панели берётся из реестра ТОГО репозитория, где идёт сборка: в форке
+  # Docker Publish кладёт его в `ghcr.io/<owner>/rezeis`, а не в апстрим
+  # `ghcr.io/dizzzable/rezeis`, которого там нет (из-за этого E2E падал на
+  # `docker pull ...:sha-<commit>: not found`).
+  PANEL_REPOSITORY: ghcr.io/${{ github.repository_owner }}/rezeis
   CABINET_REPOSITORY: ghcr.io/dizzzable/reiwa
   # Where the panel states the oldest cabinet it supports.
   FLOOR_SOURCE: rezeis-admin/src/modules/reiwa-peers/cabinet-capabilities.ts
@@ -123,6 +130,14 @@ jobs:
           node-version: '26'
           cache: npm
           cache-dependency-path: e2e/package-lock.json
+
+      # Токен нужен, только если пакет панели приватный (форк по умолчанию
+      # такой): для публичного пакета логин безвреден.
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Resolve the pair
         id: pair
