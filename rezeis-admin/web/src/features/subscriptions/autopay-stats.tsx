@@ -129,6 +129,10 @@ export function AutopayStats() {
   ]
 
   const isEmpty =
+    chartRows.length > 0 &&
+    chartRows.every(
+      (row) => row.autopayRenewed + row.manualSupersededLive + row.manualSupersededCancelled === 0,
+    )
 
   return (
     <Card>
@@ -189,19 +193,12 @@ export function AutopayStats() {
                       color: 'var(--popover-foreground)',
                       fontSize: 12,
                     }}
-                    formatter={(value: number, name: string) => [
-                      value,
-                      t(`autopayStats.legend.${name}`, { defaultValue: name }),
-                    ]}
-                    labelFormatter={(label: string) =>
-                      data?.bucketDays === 7 ? t('autopayStats.weekOf', { date: label }) : label
-                    }
                   />
                   {SERIES.map((series, index) => (
                     <Bar
                       key={series.key}
                       dataKey={series.key}
-                      name={series.label}
+                      name={t(`autopayStats.legend.${series.label}`)}
                       stackId="events"
                       fill={series.color}
                       radius={index === SERIES.length - 1 ? [4, 4, 0, 0] : undefined}
@@ -328,8 +325,3 @@ export function AutopayStats() {
     </Card>
   )
 }
-
-    chartRows.length > 0 &&
-    chartRows.every(
-      (row) => row.autopayRenewed + row.manualSupersededLive + row.manualSupersededCancelled === 0,
-    )
