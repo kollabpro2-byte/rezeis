@@ -205,6 +205,15 @@ export const EVENT_TYPES = {
   PAYMENT_COMPLETED: 'payment.completed',
   PAYMENT_FAILED: 'payment.failed',
   /**
+   * Провайдер не смог списать по автоподписке.
+   *
+   * Отдельный тип, а не `payment.failed`, намеренно: на `payment.failed` висят
+   * попап в кабинете, realtime-проекция плательщика и правила автоматизаций, и
+   * провал рекуррентного списания вылез бы клиенту как «ваш платёж не прошёл»,
+   * хотя платить он ничего не начинал. Этот тип — только для оператора.
+   */
+  PAYMENT_AUTOPAY_CHARGE_FAILED: 'payment.autopay_charge_failed',
+  /**
    * Money given back to the customer. Deliberately NOT `payment.failed`: that
    * type can be bound to a customer email template, and a refund is not a
    * failed payment — the customer would get "your payment did not go through"
@@ -598,6 +607,10 @@ export const OPERATOR_ONLY_EVENT_TYPES: ReadonlySet<string> = new Set<string>([
   // A gateway setting to fix, or a charge to place by hand: not news for a
   // customer, and not a payment for any rule or integration to read.
   EVENT_TYPES.PAYMENT_AUTOPAY_ATTENTION,
+  // Провал рекуррентного списания: это не платёж клиента, и клиент о нём узнаёт
+  // своим уведомлением (каталог `AUTOPAY_FIRST_CHARGE_FAILED_*`), а не попапом
+  // «платёж не прошёл» из realtime-проекции `payment.failed`.
+  EVENT_TYPES.PAYMENT_AUTOPAY_CHARGE_FAILED,
 ]);
 
 // ── Service ─────────────────────────────────────────────────────────────────
@@ -2105,6 +2118,32 @@ export class SystemEventsService {
     // belong to any dedicated block above. Each is optional and escaped.
     const extraLines: string[] = [];
     if (meta['reason']) extraLines.push(`📌 Причина: ${humanizeReason(meta['reason'])}`);
+    // Все списания по автоподписке, новее первыми: каждое — в <code>, чтобы в
+    // Telegram это копировалось одним нажатием. Раньше оператор искал платёж в
+    // кабинете провайдера по дате и сумме.
+    if (Array.isArray(meta['chargeIds'])) {
+      const chargeIds = meta['chargeIds']
+        .map((id) => String(id ?? '').trim())
+        .filter((id) => id.length > 0);
+      const shown = chargeIds.slice(0, 10);
+      if (shown.length > 0) {
+        const rest = chargeIds.length - shown.length;
+        extraLines.push(
+          '🧾 Списания по подписке: ' +
+            shown.map((id) => `<code>${escapeHtml(id)}</code>`).join(' ') +
+            (rest > 0 ? ` и ещё ${rest}` : ''),
+        );
+      }
+    }
+    // `recurrent_id` — то, по чему автоподписку ищут в кабинете провайдера, а
+    // `autopayRowId` — строка вкладки «Автосписания». Оба в <code>: копируются
+    // одним нажатием, без перепечатывания.
+    if (isPresent(meta['providerRecurrentId'])) {
+      extraLines.push(`🔁 Рекуррент: <code>${escapeHtml(meta['providerRecurrentId'])}</code>`);
+    }
+    if (isPresent(meta['autopayRowId'])) {
+      extraLines.push(`📄 Строка автосписания: <code>${escapeHtml(meta['autopayRowId'])}</code>`);
+    }
     if (meta['note']) extraLines.push(`📝 Заметка: ${escapeHtml(meta['note'])}`);
     if (meta['addOnType']) {
       const val = meta['addOnValue'] !== undefined ? ` ${escapeHtml(meta['addOnValue'])}` : '';
@@ -3827,8 +3866,27 @@ export const EVENT_PRESENTATION: Record<string, EventPresentation> = {
     emoji: '💰',
     title: 'Платёж получен',
     warning: { emoji: '⚠️', title: 'Платёж получен, нужна проверка' },
+    variants: [
+      {
+        // `PaymentSubscriptionMutationService`: транзакция доставлена ключом
+        // `provider-subscription:<rowId>:…`, то есть это списание самого
+        // провайдера по автоподписке. Для оператора это не «клиент заплатил», а
+        // «автосписание сработало» — так и подписано.
+        emoji: '✅',
+        title: 'Успешное списание по подписке',
+        when: (metadata) => metadata['autopay'] === true,
+      },
+    ],
   },
-  'payment.failed': { emoji: '❌', title: 'Платёж не прошёл' },
+  'payment.failed': {
+    emoji: '❌',
+    title: 'Платёж не прошёл',
+  },
+  // Провал списания по автоподписке: тикет для оператора, клиенту не уходит.
+  'payment.autopay_charge_failed': {
+    emoji: '⚠️',
+    title: 'Неуспешное списание по подписке',
+  },
   'payment.refunded': { emoji: '↩️', title: 'Платёж возвращён' },
   'payment.refund_partial': { emoji: '⚠️', title: 'Частичный возврат платежа' },
   'payment.amount_mismatch': {

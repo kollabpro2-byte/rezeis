@@ -234,6 +234,11 @@ const EVENT_TYPE_CATALOG: Readonly<Record<string, readonly string[]>> = {
     // subscription the panel cannot place. Operator-only; also delivered to
     // whoever ticked payment.failed or payment.amount_mismatch.
     'payment.autopay_attention',
+    // Провайдер не смог списать по автоподписке. Отдельный тип, а не
+    // payment.failed: у того есть попап и шаблоны для клиента, а здесь платил
+    // не он. Оператору — в тот же топик платежей; карточка несёт id всех
+    // списаний строки, чтобы платёж нашёлся в кабинете провайдера.
+    'payment.autopay_charge_failed',
     'payment.autopay_confirmation_required',
     // Grouped here, not under SUBSCRIPTION, because its emit site passes
     // category PAYMENT — which is what picks the Telegram topic it lands in.

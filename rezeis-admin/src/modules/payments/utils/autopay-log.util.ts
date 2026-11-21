@@ -18,6 +18,13 @@ export interface AutopayAttempt {
   readonly amount?: string;
   /** Слово провайдера о неудаче (только у неуспешных). */
   readonly error?: string | null;
+  /**
+   * Идентификатор списания у провайдера: Antilopay `payment_id` (`APAY…`).
+   * По нему оператор находит платёж в личном кабинете провайдера.
+   */
+  readonly paymentId?: string;
+  /** Наш `payment_id` (он же `order_id` у провайдера) этого списания. */
+  readonly orderId?: string;
 }
 
 /** Сколько последних попыток храним. */
@@ -52,11 +59,15 @@ export function readAutopayAttempts(value: unknown): AutopayAttempt[] {
     const ok = record['ok'] === true;
     const amount = readText(record['amount']);
     const error = readText(record['error']);
+    const paymentId = readText(record['paymentId']);
+    const orderId = readText(record['orderId']);
     out.push({
       at,
       ok,
       ...(ok && amount !== null ? { amount } : {}),
       ...(ok ? {} : { error }),
+      ...(paymentId === null ? {} : { paymentId }),
+      ...(orderId === null ? {} : { orderId }),
     });
   }
   return out;
@@ -64,16 +75,49 @@ export function readAutopayAttempts(value: unknown): AutopayAttempt[] {
 
 /**
  * Дописывает попытку и обрезает историю до {@link AUTOPAY_ATTEMPTS_CAP}.
- * Одинаковые попытки (тот же момент и результат) не дублируются: синхронизация
- * может пройти дважды по одному и тому же списанию.
+ *
+ * Дубли не пишутся: синхронизация может пройти дважды по одному списанию.
+ * Ключ — идентификатор списания у провайдера, когда он есть (это точнее всего:
+ * два разных списания в одну секунду — редкость, но одно и то же списание,
+ * увиденное дважды, — обычное дело), иначе момент и результат.
  */
 export function appendAutopayAttempt(value: unknown, entry: AutopayAttempt): AutopayAttempt[] {
   const existing = readAutopayAttempts(value);
-  if (existing.some((attempt) => attempt.at === entry.at && attempt.ok === entry.ok)) {
-    return existing;
-  }
+  const duplicate = existing.some((attempt) =>
+    entry.paymentId !== undefined && attempt.paymentId !== undefined
+      ? attempt.paymentId === entry.paymentId
+      : attempt.at === entry.at && attempt.ok === entry.ok,
+  );
+  if (duplicate) return existing;
   const next = [...existing, entry].sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
   return next.length > AUTOPAY_ATTEMPTS_CAP ? next.slice(next.length - AUTOPAY_ATTEMPTS_CAP) : next;
+}
+
+/**
+ * Идентификаторы всех списаний из истории: провайдера (`paymentId`) и наши
+ * (`orderId`), без повторов, новее — первыми.
+ *
+ * Это то, что оператор копирует в карточку: по `paymentId` платёж ищется в
+ * кабинете провайдера, по `orderId` — в панели.
+ */
+export function autopayChargeIds(value: unknown, limit = 50): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  // `readAutopayAttempts` отдаёт историю по возрастанию даты — разворачиваем,
+  // чтобы в карточке и в таблице первым был самый свежий платёж.
+  for (const attempt of [...readAutopayAttempts(value)].reverse()) {
+    if (!attempt.ok) continue;
+    if (attempt.paymentId !== undefined && !seen.has(attempt.paymentId)) {
+      seen.add(attempt.paymentId);
+      out.push(attempt.paymentId);
+    }
+    if (attempt.orderId !== undefined && !seen.has(attempt.orderId)) {
+      seen.add(attempt.orderId);
+      out.push(attempt.orderId);
+    }
+    if (out.length >= limit) break;
+  }
+  return out.slice(0, limit);
 }
 
 /** Сводка по истории для таблицы автосписаний. */

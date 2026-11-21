@@ -74,6 +74,7 @@ import {
 } from '../../notifications/catalog/default-templates.catalog';
 import { UserNotificationsService } from '../../notifications/services/user-notifications.service';
 import { ProviderSubscriptionService } from './provider-subscription.service';
+import { autopayChargeIds } from '../utils/autopay-log.util';
 import { displayPlanName } from '../../plans/utils/plan-deletion.util';
 import { readTrialSettings } from '../../plans/utils/trial-settings.util';
 import {
@@ -511,9 +512,17 @@ export class PaymentSubscriptionMutationService {
     // payment's plan above, and where its money went in the keys and the note.
     const latePlanMigrationRenewal = result.latePlanMigrationRenewal ?? null;
     const renewalPricedBeforeUpgrade = result.renewalPricedBeforeUpgrade ?? null;
+    // Списание самой автоподписки помечено ключом `provider-subscription:<rowId>:…`
+    // (`findOrCreateChargeTransaction`). Такой платёж — не «Платёж получен», а
+    // «Успешное списание по подписке», и оператору нужны id всех списаний строки.
+    const autopayCharge = readAutopayChargeKey(transaction.idempotencyKey);
+    const autopayRowChargeIds = autopayCharge === null
+      ? []
+      : await readAutopayChargeIdsFor(this.prismaService, autopayCharge.rowId);
     const completedMetadata = {
       userId: transaction.userId,
       paymentId: transaction.paymentId,
+      ...(autopayCharge === null ? {} : autopayChargeMetadata(autopayCharge, autopayRowChargeIds)),
       purchaseType: transaction.purchaseType,
       planName: purchasedPlan.name,
       planType: purchasedPlan.type,
@@ -5102,4 +5111,59 @@ function resolveDeviceType(deviceTypes: readonly string[]): DeviceType | null {
   return (Object.values(DeviceType) as string[]).includes(upper)
     ? (upper as DeviceType)
     : null;
+}
+
+/**
+ * Ключ транзакции, которой провайдер доставил своё списание по автоподписке.
+ *
+ * `findOrCreateChargeTransaction` делает два вида ключей:
+ * `provider-subscription:<rowId>:payment:<providerPaymentId>` (Antilopay, ключ
+ * по платежу) и `provider-subscription:<rowId>:charge:<n>` (провайдеры, которые
+ * считают списания номером). `<rowId>` — cuid, двоеточий в нём нет.
+ *
+ * Разбирается здесь, а не только проверяется префиксом, потому что карточке
+ * оператора нужны оба id: строки (для вкладки «Автосписания») и платежа у
+ * провайдера (для его личного кабинета).
+ */
+export function readAutopayChargeKey(
+  key: string | null | undefined,
+): { readonly rowId: string; readonly providerPaymentId: string | null } | null {
+  const match = /^provider-subscription:([^:]+):(?:payment|charge):(.+)$/.exec(key ?? '');
+  if (match === null) return null;
+  const rowId = match[1];
+  if (rowId === undefined || rowId.length === 0) return null;
+  // У «номерных» ключей последний сегмент — номер списания, а не id платежа.
+  const tail = match[2] ?? '';
+  const isPaymentKey = (key ?? '').includes(':payment:');
+  return { rowId, providerPaymentId: isPaymentKey && tail.length > 0 ? tail : null };
+}
+
+/**
+ * Что карточка «Успешное списание по подписке» добавляет к обычному платежу:
+ * флаг (по нему выбирается заголовок), id строки автоподписки и список id всех
+ * списаний — оператор копирует их одним движением, не разыскивая в ЛК.
+ */
+export function autopayChargeMetadata(
+  charge: { readonly rowId: string; readonly providerPaymentId: string | null },
+  ids: readonly string[],
+): Record<string, unknown> {
+  return {
+    autopay: true,
+    autopayRowId: charge.rowId,
+    ...(charge.providerPaymentId === null ? {} : { providerPaymentId: charge.providerPaymentId }),
+    ...(ids.length === 0 ? {} : { chargeIds: [...ids] }),
+  };
+}
+
+/** Id списаний строки для карточки: провайдерские и наши, самые свежие первыми. */
+async function readAutopayChargeIdsFor(
+  prisma: PrismaService,
+  rowId: string,
+  limit = 10,
+): Promise<string[]> {
+  const row = await prisma.providerSubscription.findUnique({
+    where: { id: rowId },
+    select: { attempts: true },
+  }).catch(() => null);
+  return row === null ? [] : autopayChargeIds(row.attempts, limit);
 }

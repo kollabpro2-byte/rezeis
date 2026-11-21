@@ -47,7 +47,7 @@ import {
   postAntilopay,
 } from '../utils/antilopay-api.util';
 import { antilopayRefundEnvelope, completedAntilopayRefunds } from '../utils/antilopay-refund.util';
-import { appendAutopayAttempt, type AutopayAttempt } from '../utils/autopay-log.util';
+import { appendAutopayAttempt, autopayChargeIds, type AutopayAttempt } from '../utils/autopay-log.util';
 import {
   type AutopayFlags,
   readAutopayFlags,
@@ -811,6 +811,9 @@ export class ProviderSubscriptionService {
         await this.recordAttempt(row.id, {
           at: (state.lastChargeAt ?? new Date()).toISOString(),
           ok: true,
+          // Провайдер не назвал id списания, но наш order_id есть — его хватит,
+          // чтобы найти платёж в панели.
+          ...(transaction.paymentId ? { orderId: transaction.paymentId } : {}),
         });
       }
     }
@@ -875,6 +878,10 @@ export class ProviderSubscriptionService {
         ok: false,
         error: state.providerStatus ?? 'PAST_DUE',
       });
+      // Провайдер не смог списать — оператор должен узнать это из Telegram, а не
+      // только из строки таблицы. Дедупликация здесь не нужна: блок срабатывает
+      // один раз на новый результат (первый PAST_DUE или сдвиг даты/статуса).
+      await this.announceAutopayChargeFailed(row, state.providerStatus, state.nextChargeAt, status);
     }
     if (providerCancelled) {
       // Cancelled without the panel asking — the payer used the link in the
@@ -1046,6 +1053,53 @@ export class ProviderSubscriptionService {
     }
   }
 
+  /**
+   * Карточка «Неуспешное списание по подписке».
+   *
+   * Раньше провал рекуррентного списания был виден только в истории попыток
+   * строки: денег не двигалось, транзакции нет, события нет — и оператор узнавал
+   * о нём, лишь открыв вкладку. Здесь есть и слово провайдера, и id всех
+   * успешных списаний строки: по ним платёж находится в его кабинете.
+   */
+  private async announceAutopayChargeFailed(
+    row: ProviderSubscription,
+    providerStatus: string | null,
+    nextChargeAt: Date | null,
+    status: ProviderSubscriptionStatus,
+  ): Promise<void> {
+    if (this.systemEvents === undefined) return;
+    const fresh = await this.prismaService.providerSubscription
+      .findUnique({ where: { id: row.id }, select: { attempts: true } })
+      .catch(() => null);
+    const ids = autopayChargeIds(fresh?.attempts ?? null, 10);
+    const when = nextChargeAt === null ? null : nextChargeAt.toISOString().slice(0, 10);
+    this.systemEvents.warn(
+      EVENT_TYPES.PAYMENT_AUTOPAY_CHARGE_FAILED,
+      'PAYMENT',
+      'Неуспешное списание по подписке',
+      {
+        gatewayType: row.gatewayType,
+        autopayRowId: row.id,
+        ...(row.userId === null ? {} : { userId: row.userId }),
+        ...(row.subscriptionId === null ? {} : { subscriptionId: row.subscriptionId }),
+        amount: row.amount.toString(),
+        currency: row.currency,
+        providerStatus,
+        status,
+        ...(row.providerRecurrentId === null ? {} : { providerRecurrentId: row.providerRecurrentId }),
+        ...(when === null ? {} : { nextChargeAt: when }),
+        ...(ids.length === 0 ? {} : { chargeIds: ids }),
+        note:
+          `Провайдер не смог списать ${row.amount.toString()} ${row.currency}` +
+          `${when === null ? '' : ` (планировалось ${when})`}, статус ${providerStatus ?? 'неизвестен'}. ` +
+          (ids.length === 0
+            ? 'Успешных списаний по этой автоподписке ещё не было.'
+            : `Уже списано, id для поиска в кабинете провайдера: ${ids.join(', ')}.`) +
+          ' Провайдер повторит списание сам; если клиент оплатил вручную — отмените автосписание в панели.',
+      },
+    );
+  }
+
   private async applyKeyedCharges(
     row: ProviderSubscription,
     charges: readonly AntilopayCharge[],
@@ -1141,6 +1195,10 @@ export class ProviderSubscriptionService {
           at: (charge.at ?? new Date()).toISOString(),
           ok: true,
           ...(charge.amount === null ? {} : { amount: charge.amount }),
+          // Провайдерское id списания — по нему оператор находит платёж в ЛК,
+          // а `orderId` (наш payment_id) — в панели.
+          paymentId: charge.id,
+          ...(transaction.paymentId ? { orderId: transaction.paymentId } : {}),
         });
       }
       // A refund made at Antilopay after the day of the charge is listed beside

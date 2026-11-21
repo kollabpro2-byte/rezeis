@@ -4,6 +4,7 @@ import { describe, it } from 'node:test';
 import {
   AUTOPAY_ATTEMPTS_CAP,
   appendAutopayAttempt,
+  autopayChargeIds,
   autopayGraceDeadline,
   readAutopayAttempts,
   shouldExtendForAutopay,
@@ -59,6 +60,69 @@ describe('autopay-log.util', () => {
       // Последняя добавленная осталась, самая старая — ушла.
       assert.equal(list[list.length - 1]?.at, new Date(Date.UTC(2026, 0, 1, 0, AUTOPAY_ATTEMPTS_CAP + 11)).toISOString());
       assert.equal(list[0]?.at, new Date(Date.UTC(2026, 0, 1, 0, 12)).toISOString());
+    });
+  });
+
+  describe('ids списаний', () => {
+    it('читает paymentId и orderId из истории', () => {
+      const attempts = readAutopayAttempts([
+        { at: '2026-11-01T10:00:00.000Z', ok: true, paymentId: 'APAY-1', orderId: 'order-1' },
+      ]);
+      assert.equal(attempts[0]?.paymentId, 'APAY-1');
+      assert.equal(attempts[0]?.orderId, 'order-1');
+    });
+
+    it('дедуплицирует по id списания, даже если дата отличается', () => {
+      // Один и тот же платёж, увиденный двумя синхронизациями с разным временем:
+      // дата у провайдера могла уточниться, а деньги — те же.
+      const first = appendAutopayAttempt([], {
+        at: '2026-11-01T10:00:00.000Z',
+        ok: true,
+        paymentId: 'APAY-1',
+      });
+      const second = appendAutopayAttempt(first, {
+        at: '2026-11-01T10:05:00.000Z',
+        ok: true,
+        paymentId: 'APAY-1',
+      });
+      assert.equal(second.length, 1);
+    });
+
+    it('разные платежи в одну секунду не схлопываются', () => {
+      const at = '2026-11-01T10:00:00.000Z';
+      const first = appendAutopayAttempt([], { at, ok: true, paymentId: 'APAY-1' });
+      const second = appendAutopayAttempt(first, { at, ok: true, paymentId: 'APAY-2' });
+      assert.equal(second.length, 2);
+    });
+
+    it('собирает id всех успешных списаний, новее первыми', () => {
+      const attempts = [
+        { at: '2026-09-01T10:00:00.000Z', ok: true, paymentId: 'APAY-old', orderId: 'order-old' },
+        { at: '2026-10-01T10:00:00.000Z', ok: false, error: 'ACTIVE_FAILED' },
+        { at: '2026-11-01T10:00:00.000Z', ok: true, paymentId: 'APAY-new', orderId: 'order-new' },
+      ];
+      assert.deepEqual(autopayChargeIds(attempts), [
+        'APAY-new',
+        'order-new',
+        'APAY-old',
+        'order-old',
+      ]);
+    });
+
+    it('не повторяет один и тот же id и уважает лимит', () => {
+      const attempts = [
+        { at: '2026-10-01T10:00:00.000Z', ok: true, paymentId: 'APAY-1' },
+        { at: '2026-11-01T10:00:00.000Z', ok: true, paymentId: 'APAY-1', orderId: 'order-1' },
+      ];
+      assert.deepEqual(autopayChargeIds(attempts), ['APAY-1', 'order-1']);
+      assert.deepEqual(autopayChargeIds(attempts, 1), ['APAY-1']);
+    });
+
+    it('неуспешные попытки id не дают: денег по ним не было', () => {
+      assert.deepEqual(
+        autopayChargeIds([{ at: '2026-11-01T10:00:00.000Z', ok: false, error: 'FAIL' }]),
+        [],
+      );
     });
   });
 

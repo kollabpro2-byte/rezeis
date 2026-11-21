@@ -4598,6 +4598,10 @@ export const ru = {
     cancelledInCabinet: 'Отменено вручную в ЛК',
     cancelledInCabinetDone: 'Отмена подтверждена провайдером, строка скрыта',
     cancelledInCabinetNotYet: 'Провайдер ещё не отменил: строка осталась в списке',
+    copyId: 'Скопировать id',
+    copyAllIds: 'Скопировать все id ({{count}})',
+    copied: 'Id скопирован',
+    copyFailed: 'Не удалось скопировать — выделите id вручную',
     filters: {
       stalled: 'Рассинхрон: зависла у провайдера',
       desync: 'Дата списания прошла',

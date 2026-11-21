@@ -37,6 +37,10 @@ interface AutopayAttempt {
   readonly ok: boolean
   readonly amount?: string
   readonly error?: string | null
+  /** Списание у провайдера (Antilopay `payment_id`, APAY…). */
+  readonly paymentId?: string
+  /** Наш `payment_id`/`order_id` этого списания. */
+  readonly orderId?: string
 }
 
 /** Строка таблицы: зеркало `AdminAutopayRowInterface`. */
@@ -65,6 +69,8 @@ interface AutopayRow {
     readonly lastFailureAt: string | null
   }
   readonly history: readonly AutopayAttempt[]
+  /** Id всех успешных списаний: провайдерские и наши, новее первыми. */
+  readonly chargeIds: readonly string[]
   readonly amount: string
   readonly currency: string
   readonly planId: string
@@ -237,6 +243,16 @@ export default function AutopayPage() {
 
   const items = data?.items ?? []
   const total = data?.total ?? 0
+
+  /** Копирует id в буфер: оператор вставляет его в поиск кабинета провайдера. */
+  const copyId = async (value: string): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(value)
+      toast.success(t('autopayPage.copied'))
+    } catch {
+      toast.error(t('autopayPage.copyFailed'))
+    }
+  }
 
   /** CSV текущего фильтра: те же условия, что в таблице. */
   const exportCsv = async (): Promise<void> => {
@@ -444,12 +460,36 @@ export default function AutopayPage() {
                         </div>
                         {row.history.length > 0 && (
                           <div className="flex flex-col gap-0.5 text-xs text-muted-foreground tabular-nums">
-                            {row.history.slice(-3).map((attempt) => (
-                              <span key={`${attempt.at}-${String(attempt.ok)}`}>
-                                {attempt.ok ? '✔' : '✘'} {formatDateTime(attempt.at)}
-                                {attempt.ok ? '' : ` — ${attempt.error ?? ''}`}
-                              </span>
-                            ))}
+                            {[...row.history].reverse().slice(0, 4).map((attempt) => {
+                              const id = attempt.paymentId ?? attempt.orderId ?? null
+                              return (
+                                <span key={`${attempt.at}-${String(attempt.ok)}`} className="flex items-center gap-1">
+                                  <span>
+                                    {attempt.ok ? '✔' : '✘'} {formatDateTime(attempt.at)}
+                                    {attempt.ok ? '' : ` — ${attempt.error ?? ''}`}
+                                  </span>
+                                  {id !== null && (
+                                    <button
+                                      type="button"
+                                      onClick={() => void copyId(id)}
+                                      title={t('autopayPage.copyId')}
+                                      className="font-mono text-[11px] underline decoration-dotted underline-offset-2 hover:text-foreground"
+                                    >
+                                      {id}
+                                    </button>
+                                  )}
+                                </span>
+                              )
+                            })}
+                            {row.chargeIds.length > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => void copyId(row.chargeIds.join('\n'))}
+                                className="self-start text-[11px] underline decoration-dotted underline-offset-2 hover:text-foreground"
+                              >
+                                {t('autopayPage.copyAllIds', { count: row.chargeIds.length })}
+                              </button>
+                            )}
                           </div>
                         )}
                       </div>

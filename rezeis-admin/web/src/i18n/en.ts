@@ -4473,6 +4473,10 @@ export const en = {
     cancelledInCabinet: 'Cancelled in the cabinet',
     cancelledInCabinetDone: 'The provider confirmed the cancellation; the row is hidden',
     cancelledInCabinetNotYet: 'The provider has not cancelled it yet; the row stays in the list',
+    copyId: 'Copy the id',
+    copyAllIds: 'Copy all ids ({{count}})',
+    copied: 'The id is copied',
+    copyFailed: 'Could not copy — select the id by hand',
     filters: {
       stalled: 'Stuck at the provider',
       desync: 'Charge date has passed',

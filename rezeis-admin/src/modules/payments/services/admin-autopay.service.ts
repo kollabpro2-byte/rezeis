@@ -10,6 +10,7 @@ import { type AutopayRefundOutcome, UNKNOWN_AUTOPAY_GATEWAY } from '../utils/ref
 import {
   type AutopayAttempt,
   type AutopayAttemptSummary,
+  autopayChargeIds,
   readAutopayAttempts,
   summariseAutopayAttempts,
 } from '../utils/autopay-log.util';
@@ -82,6 +83,8 @@ export interface AdminAutopayRowInterface {
   readonly attempts: AutopayAttemptSummary;
   /** Последние попытки, новее в конце: дата и время видны оператору. */
   readonly history: readonly AutopayAttempt[];
+  /** Id всех успешных списаний (провайдер + наши), новее первыми. */
+  readonly chargeIds: readonly string[];
   readonly amount: string;
   readonly currency: string;
   readonly planId: string;
@@ -141,6 +144,9 @@ export interface AdminAutopayListInterface {
 
 /** Сколько последних попыток показываем в строке таблицы. */
 const HISTORY_IN_ROW = 10;
+
+/** Сколько id списаний отдаём в строке: их копируют целиком. */
+const CHARGE_IDS_IN_ROW = 20;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -424,6 +430,7 @@ export class AdminAutopayService implements OnModuleDestroy {
           : (expiresById.get(row.subscriptionId)?.toISOString() ?? null),
         attempts: summariseAutopayAttempts(row.attempts),
         history: history.slice(Math.max(0, history.length - HISTORY_IN_ROW)),
+        chargeIds: autopayChargeIds(row.attempts, CHARGE_IDS_IN_ROW),
         amount: row.amount.toString(),
         currency: row.currency,
         planId: row.planId,
@@ -612,6 +619,7 @@ export class AdminAutopayService implements OnModuleDestroy {
       'manual_cancel_required',
       'provider_recurrent_id',
       'stranded_reason',
+      'charge_ids',
     ];
     const lines = [header.join(',')];
     for (const row of collected) {
@@ -637,6 +645,7 @@ export class AdminAutopayService implements OnModuleDestroy {
           row.manualCancelRequired ? 'true' : 'false',
           row.providerRecurrentId ?? '',
           row.strandedReason ?? '',
+          row.chargeIds.join(' '),
         ]
           .map(csvCell)
           .join(','),
