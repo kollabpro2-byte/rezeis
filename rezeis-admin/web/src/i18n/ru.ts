@@ -4618,6 +4618,8 @@ export const ru = {
       errorRate: 'Ошибок списания',
       ofExpected: 'из {{count}} ожидаемых',
       failedOfExpected: 'не прошло {{count}} из {{expected}}',
+      missed: 'Не состоялось',
+      missedHint: 'Планировалось, но попытки не было',
     },
   },
 

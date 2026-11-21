@@ -4493,6 +4493,8 @@ export const en = {
       errorRate: 'Charge errors',
       ofExpected: 'of {{count}} expected',
       failedOfExpected: '{{count}} of {{expected}} failed',
+      missed: 'Never attempted',
+      missedHint: 'Planned, but the provider never tried',
     },
   },
 

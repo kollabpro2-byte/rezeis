@@ -740,7 +740,14 @@ export class AdminAutopayService implements OnModuleDestroy {
       // Деньги считаются по истории попыток: каждая попытка — это плановое
       // списание, поэтому успешные и неуспешные берутся из одной базы.
       this.prismaService.providerSubscription.findMany({
-        select: { amount: true, currency: true, createdAt: true, attempts: true },
+        select: {
+          amount: true,
+          currency: true,
+          createdAt: true,
+          attempts: true,
+          nextChargeAt: true,
+          status: true,
+        },
       }),
     ]);
 
@@ -811,6 +818,8 @@ export class AdminAutopayService implements OnModuleDestroy {
       readonly currency: string;
       readonly createdAt: Date;
       readonly attempts: unknown;
+      readonly nextChargeAt: Date | null;
+      readonly status: ProviderSubscriptionStatus;
     }>,
     range: AutopayStatsRange,
   ): AutopayMoneyStatsInterface {
@@ -820,6 +829,8 @@ export class AdminAutopayService implements OnModuleDestroy {
         currency: row.currency,
         createdAt: row.createdAt,
         attempts: row.attempts,
+        nextChargeAt: row.nextChargeAt,
+        status: row.status,
       })),
       range,
     });
@@ -829,6 +840,7 @@ export class AdminAutopayService implements OnModuleDestroy {
       expectedCharges: totals.expectedCharges,
       succeededCharges: totals.succeededCharges,
       failedCharges: totals.failedCharges,
+      missedCharges: totals.missedCharges,
       successRate: sharePercent(totals.succeededCharges, totals.expectedCharges),
       errorRate: sharePercent(totals.failedCharges, totals.expectedCharges),
       potential: currencies.map(([currency, value]) => ({

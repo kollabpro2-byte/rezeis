@@ -193,6 +193,61 @@ describe('autopay-stats.util', () => {
       assert.deepEqual(totals.byCurrency.get('RUB'), { potentialCents: 0, receivedCents: 0 });
     });
   });
+
+  describe('«не состоялось»: план был, попытки не было', () => {
+    const range = statsRange('30d', NOW);
+
+    /** Строка, у которой дата списания прошла, а попыток нет. */
+    const missedRow = (nextChargeAt: string, overrides: Record<string, unknown> = {}) => ({
+      amount: '299.00',
+      currency: 'RUB',
+      createdAt: new Date('2026-10-01T10:00:00Z'),
+      attempts: [],
+      nextChargeAt: new Date(nextChargeAt),
+      status: 'ACTIVE',
+      ...overrides,
+    });
+
+    it('считает пропуск, если дата прошла и попытки не было', () => {
+      const totals = accumulateMoney({ rows: [missedRow('2026-11-10T10:00:00Z')], range });
+      assert.equal(totals.missedCharges, 1);
+      // В проценты это не входит: ожидаемых попыток нет.
+      assert.equal(totals.expectedCharges, 0);
+    });
+
+    it('не считает, если попытка была рядом с плановой датой', () => {
+      const totals = accumulateMoney({
+        rows: [
+          missedRow('2026-11-10T10:00:00Z', {
+            attempts: [{ at: at('2026-11-12T10:00:00Z'), ok: false, error: 'ACTIVE_FAILED' }],
+          }),
+        ],
+        range,
+      });
+      assert.equal(totals.missedCharges, 0);
+    });
+
+    it('даёт сутки форы свежему списанию: сегодняшнее — ещё не пропуск', () => {
+      const totals = accumulateMoney({ rows: [missedRow('2026-11-21T09:00:00Z')], range });
+      assert.equal(totals.missedCharges, 0);
+    });
+
+    it('будущее и отменённые строки не считает', () => {
+      const future = accumulateMoney({ rows: [missedRow('2026-12-10T10:00:00Z')], range });
+      assert.equal(future.missedCharges, 0);
+      const cancelled = accumulateMoney({
+        rows: [missedRow('2026-11-10T10:00:00Z', { status: 'CANCELLED' })],
+        range,
+      });
+      assert.equal(cancelled.missedCharges, 0);
+    });
+
+    it('план раньше периода в периодический срез не попадает, а в «всё время» — да', () => {
+      const old = missedRow('2026-06-10T10:00:00Z');
+      assert.equal(accumulateMoney({ rows: [old], range }).missedCharges, 0);
+      assert.equal(accumulateMoney({ rows: [old], range: statsRange('all', NOW) }).missedCharges, 1);
+    });
+  });
   describe('bucketStart', () => {
     it('округляет вниз до суток', () => {
       assert.equal(

@@ -34,6 +34,8 @@ interface MoneyStats {
   readonly failedCharges: number
   readonly successRate: number
   readonly errorRate: number
+  /** Плановые списания, по которым провайдер не сделал ни одной попытки. */
+  readonly missedCharges: number
   readonly potential: ReadonlyArray<{ readonly currency: string; readonly amount: string }>
   readonly received: ReadonlyArray<{ readonly currency: string; readonly amount: string }>
 }
@@ -242,7 +244,7 @@ export function AutopayStats() {
                   </p>
                 </div>
 
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
                   <div className="rounded-xl border border-border/60 p-3">
                     <p className="text-xs text-muted-foreground">{t('autopayStats.money.potential')}</p>
                     {data.money.potential.length === 0 ? (
@@ -304,6 +306,18 @@ export function AutopayStats() {
                         expected: data.money.expectedCharges,
                       })}
                     </p>
+                  </div>
+
+                  <div className="rounded-xl border border-border/60 p-3">
+                    <p className="text-xs text-muted-foreground">{t('autopayStats.money.missed')}</p>
+                    <p
+                      className={`text-2xl font-bold tabular-nums ${
+                        data.money.missedCharges > 0 ? 'text-amber-600' : 'text-muted-foreground'
+                      }`}
+                    >
+                      {data.money.missedCharges}
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">{t('autopayStats.money.missedHint')}</p>
                   </div>
                 </div>
               </div>

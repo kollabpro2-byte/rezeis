@@ -110,6 +110,12 @@ export interface AutopayMoneyStatsInterface {
   readonly expectedCharges: number;
   readonly succeededCharges: number;
   readonly failedCharges: number;
+  /**
+   * Плановые списания, по которым провайдер не сделал ни одной попытки: дата
+   * списания прошла, а результата нет. В проценты не входят — это не неудача
+   * оплаты, а её отсутствие.
+   */
+  readonly missedCharges: number;
   /** Проценты с одним знаком: успешных и ошибок из ожидаемых. */
   readonly successRate: number;
   readonly errorRate: number;
@@ -124,7 +130,17 @@ export interface AutopayMoneyRow {
   readonly currency: string;
   readonly createdAt: Date;
   readonly attempts: unknown;
+  /** Планируемая дата следующего списания — по ней ищем «не состоялось». */
+  readonly nextChargeAt?: Date | null;
+  /** Наш статус: «не состоялось» считается только по живым строкам. */
+  readonly status?: string;
 }
+
+/** Свежее плановое списание ещё может пройти: сутки форы, прежде чем звать его пропуском. */
+export const MISSED_CHARGE_GRACE_MS = 24 * 60 * 60 * 1000;
+
+/** Насколько попытка может разойтись с плановой датой и всё равно считаться «была». */
+export const MISSED_CHARGE_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
 
 /**
  * Считает деньги и качество списаний по истории попыток.
@@ -147,6 +163,7 @@ export function accumulateMoney(input: {
   readonly expectedCharges: number;
   readonly succeededCharges: number;
   readonly failedCharges: number;
+  readonly missedCharges: number;
   readonly byCurrency: ReadonlyMap<string, { readonly potentialCents: number; readonly receivedCents: number }>;
 } {
   const from = input.range.from?.getTime() ?? null;
@@ -156,13 +173,15 @@ export function accumulateMoney(input: {
   let expectedCharges = 0;
   let succeededCharges = 0;
   let failedCharges = 0;
+  let missedCharges = 0;
 
   for (const row of input.rows) {
     const created = row.createdAt.getTime();
     if ((from === null || created >= from) && created <= to) issued += 1;
 
+    const attempts = readAutopayAttempts(row.attempts);
     const bucket = byCurrency.get(row.currency) ?? { potentialCents: 0, receivedCents: 0 };
-    for (const attempt of readAutopayAttempts(row.attempts)) {
+    for (const attempt of attempts) {
       const at = new Date(attempt.at).getTime();
       if (!Number.isFinite(at) || at < (from ?? 0) || at > to) continue;
       expectedCharges += 1;
@@ -176,9 +195,25 @@ export function accumulateMoney(input: {
       }
     }
     byCurrency.set(row.currency, bucket);
+
+    // «Не состоялось»: дата списания прошла, а попытки по ней не было вовсе.
+    // Считаем только живые строки — у отменённых списаний уже не планируется.
+    if (row.status !== 'ACTIVE' && row.status !== 'PAST_DUE') continue;
+    const planned = row.nextChargeAt ?? null;
+    if (planned === null) continue;
+    const plannedAt = planned.getTime();
+    if (!Number.isFinite(plannedAt)) continue;
+    // Свежее списание ещё может пройти, а давнее — уже вне периода.
+    if (plannedAt > to - MISSED_CHARGE_GRACE_MS) continue;
+    if (from !== null && plannedAt < from) continue;
+    const attempted = attempts.some((attempt) => {
+      const at = new Date(attempt.at).getTime();
+      return Number.isFinite(at) && Math.abs(at - plannedAt) <= MISSED_CHARGE_WINDOW_MS;
+    });
+    if (!attempted) missedCharges += 1;
   }
 
-  return { issued, expectedCharges, succeededCharges, failedCharges, byCurrency };
+  return { issued, expectedCharges, succeededCharges, failedCharges, missedCharges, byCurrency };
 }
 
 /** Процент с одним знаком; ноль ожидаемых — ноль процентов, а не деление на ноль. */
