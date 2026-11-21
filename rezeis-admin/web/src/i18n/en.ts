@@ -4495,6 +4495,8 @@ export const en = {
       failedOfExpected: '{{count}} of {{expected}} failed',
       missed: 'Never attempted',
       missedHint: 'Planned, but the provider never tried',
+      attemptsSince:
+        'Successful charges come from payments for all time. Failed attempts and “missed” have been stored since {{date}} — earlier they were not recorded, so “potential” is a lower bound (received plus known failures).',
     },
   },
 

@@ -728,7 +728,7 @@ export class AdminAutopayService implements OnModuleDestroy {
           idempotencyKey: { startsWith: 'provider-subscription:' },
           ...(range.from === null ? {} : { createdAt: inRange }),
         },
-        select: { createdAt: true, gatewayType: true },
+        select: { createdAt: true, gatewayType: true, amount: true, currency: true },
       }),
       this.prismaService.providerSubscription.findMany({
         where: {
@@ -737,8 +737,9 @@ export class AdminAutopayService implements OnModuleDestroy {
         },
         select: { status: true, strandedAt: true, gatewayType: true },
       }),
-      // Деньги считаются по истории попыток: каждая попытка — это плановое
-      // списание, поэтому успешные и неуспешные берутся из одной базы.
+      // Деньги: успешные списания — из тех же транзакций, что и счётчик
+      // «сработало» (история попыток ведётся только с 20.11.2026), а неуспешные
+      // и «не состоялось» — из `attempts`.
       this.prismaService.providerSubscription.findMany({
         select: {
           amount: true,
@@ -807,11 +808,25 @@ export class AdminAutopayService implements OnModuleDestroy {
       series: [...series.entries()]
         .sort((left, right) => left[0] - right[0])
         .map(([at, value]) => ({ bucket: new Date(at).toISOString(), ...value })),
-      money: this.moneyStats(moneyRows, range),
+      money: this.moneyStats(
+        moneyRows,
+        range,
+        renewed.map((row) => ({
+          at: row.createdAt,
+          amount: row.amount.toString(),
+          currency: row.currency,
+        })),
+      ),
     };
   }
 
-  /** Деньги и качество списаний для {@link statistics}: суммы по валютам и проценты. */
+  /**
+   * Деньги и качество списаний для {@link statistics}.
+   *
+   * `successfulCharges` — те же платежи, что дали счётчик «сработало»: так
+   * «получено» всегда сходится со счётчиком, а не с историей попыток, которая
+   * ведётся лишь с 20.11.2026 (владелец, 22.11.2026).
+   */
   private moneyStats(
     rows: ReadonlyArray<{
       readonly amount: { toString(): string };
@@ -822,6 +837,11 @@ export class AdminAutopayService implements OnModuleDestroy {
       readonly status: ProviderSubscriptionStatus;
     }>,
     range: AutopayStatsRange,
+    successfulCharges: ReadonlyArray<{
+      readonly at: Date;
+      readonly amount: string;
+      readonly currency: string;
+    }>,
   ): AutopayMoneyStatsInterface {
     const totals = accumulateMoney({
       rows: rows.map((row) => ({
@@ -833,6 +853,7 @@ export class AdminAutopayService implements OnModuleDestroy {
         status: row.status,
       })),
       range,
+      successfulCharges,
     });
     const currencies = [...totals.byCurrency.entries()].sort((left, right) => left[0].localeCompare(right[0]));
     return {
@@ -851,6 +872,7 @@ export class AdminAutopayService implements OnModuleDestroy {
         currency,
         amount: fromMinorUnits(value.receivedCents),
       })),
+      attemptsSince: totals.attemptsSince?.toISOString() ?? null,
     };
   }
 

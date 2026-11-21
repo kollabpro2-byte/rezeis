@@ -122,6 +122,12 @@ export interface AutopayMoneyStatsInterface {
   /** Потенциал — все ожидаемые списания; получено — успешные. По валютам. */
   readonly potential: ReadonlyArray<{ readonly currency: string; readonly amount: string }>;
   readonly received: ReadonlyArray<{ readonly currency: string; readonly amount: string }>;
+  /**
+   * С какой даты панель сохраняет неуспешные попытки (раньше — не сохраняла).
+   * Нужна интерфейсу, чтобы честно подписать «потенциал» как минимум.
+   * `null` — неуспешных попыток в базе нет вовсе.
+   */
+  readonly attemptsSince: string | null;
 }
 
 /** Одна строка автосписания, как её видит агрегация. */
@@ -136,6 +142,13 @@ export interface AutopayMoneyRow {
   readonly status?: string;
 }
 
+/** Успешное автосписание из платежей: деньги получены, срок продлён. */
+export interface AutopaySuccessfulCharge {
+  readonly at: Date;
+  readonly amount: string;
+  readonly currency: string;
+}
+
 /** Свежее плановое списание ещё может пройти: сутки форы, прежде чем звать его пропуском. */
 export const MISSED_CHARGE_GRACE_MS = 24 * 60 * 60 * 1000;
 
@@ -143,27 +156,36 @@ export const MISSED_CHARGE_GRACE_MS = 24 * 60 * 60 * 1000;
 export const MISSED_CHARGE_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
 
 /**
- * Считает деньги и качество списаний по истории попыток.
+ * Считает деньги и качество списаний.
  *
- * «Ожидаемые» здесь — это попытки, которые провайдер сделал за период: каждая
- * из них была плановым списанием. Так проценты честные и симметричные:
- * `successRate + errorRate = 100` (если попытки были), и обе считаются из
- * одной базы. Суммы группируются по валютам: складывать рубли с долларами
- * нельзя, поэтому валюты идут отдельными списками.
+ * Успешные списания приходят из ПЛАТЕЖЕЙ (`successfulCharges`), а не из
+ * истории попыток: колонка `attempts` появилась 20.11.2026, деньги же получены
+ * с первого автосписания. Из попыток берём только неуспешные: успешные там —
+ * дубль платежа, и считать их значило бы задвоить и счётчик, и сумму (владелец,
+ * 22.11.2026: «Получено» 900 ₽ против 8 012 ₽ в транзакциях).
  *
- * Сумма ожидаемого для успешной попытки берётся из неё самой (провайдер назвал
- * сумму списания), иначе — из суммы строки; для неуспешной — из суммы строки,
- * потому что денег по ней не было, а планировалась именно она.
+ * «Ожидаемые» поэтому = успешные платежи + известные неуспешные попытки:
+ * проценты остаются симметричными (`successRate + errorRate = 100`), но
+ * «потенциал» — это минимум, ведь провалы до 20.11 не сохранялись. Дату, с
+ * которой они есть, возвращаем как `attemptsSince`, чтобы интерфейс сказал
+ * это честно, а не выдавал неполную историю за полную.
+ *
+ * Суммы группируются по валютам: складывать рубли с долларами нельзя, поэтому
+ * валюты идут отдельными списками.
  */
 export function accumulateMoney(input: {
   readonly rows: readonly AutopayMoneyRow[];
   readonly range: AutopayStatsRange;
+  /** Успешные автосписания из транзакций: дата, сумма и валюта платежа. */
+  readonly successfulCharges: readonly AutopaySuccessfulCharge[];
 }): {
   readonly issued: number;
   readonly expectedCharges: number;
   readonly succeededCharges: number;
   readonly failedCharges: number;
   readonly missedCharges: number;
+  /** Самая ранняя сохранённая неуспешная попытка: с неё история и считается. */
+  readonly attemptsSince: Date | null;
   readonly byCurrency: ReadonlyMap<string, { readonly potentialCents: number; readonly receivedCents: number }>;
 } {
   const from = input.range.from?.getTime() ?? null;
@@ -174,6 +196,20 @@ export function accumulateMoney(input: {
   let succeededCharges = 0;
   let failedCharges = 0;
   let missedCharges = 0;
+  let attemptsSince: Date | null = null;
+
+  // Успех — факт платежа: и счётчик, и суммы берутся из одного источника.
+  for (const charge of input.successfulCharges) {
+    const at = charge.at.getTime();
+    if (!Number.isFinite(at) || at < (from ?? 0) || at > to) continue;
+    expectedCharges += 1;
+    succeededCharges += 1;
+    const bucket = byCurrency.get(charge.currency) ?? { potentialCents: 0, receivedCents: 0 };
+    const cents = toMinorUnits(charge.amount);
+    bucket.potentialCents += cents;
+    bucket.receivedCents += cents;
+    byCurrency.set(charge.currency, bucket);
+  }
 
   for (const row of input.rows) {
     const created = row.createdAt.getTime();
@@ -182,17 +218,16 @@ export function accumulateMoney(input: {
     const attempts = readAutopayAttempts(row.attempts);
     const bucket = byCurrency.get(row.currency) ?? { potentialCents: 0, receivedCents: 0 };
     for (const attempt of attempts) {
-      const at = new Date(attempt.at).getTime();
-      if (!Number.isFinite(at) || at < (from ?? 0) || at > to) continue;
+      const at = new Date(attempt.at);
+      const atMs = at.getTime();
+      if (!Number.isFinite(atMs)) continue;
+      // Успешные попытки уже посчитаны платежом — здесь только провалы.
+      if (attempt.ok) continue;
+      if (attemptsSince === null || atMs < attemptsSince.getTime()) attemptsSince = at;
+      if (atMs < (from ?? 0) || atMs > to) continue;
       expectedCharges += 1;
-      const plannedCents = toMinorUnits(attempt.ok && attempt.amount !== undefined ? attempt.amount : row.amount);
-      bucket.potentialCents += plannedCents;
-      if (attempt.ok) {
-        succeededCharges += 1;
-        bucket.receivedCents += plannedCents;
-      } else {
-        failedCharges += 1;
-      }
+      failedCharges += 1;
+      bucket.potentialCents += toMinorUnits(row.amount);
     }
     byCurrency.set(row.currency, bucket);
 
@@ -213,7 +248,7 @@ export function accumulateMoney(input: {
     if (!attempted) missedCharges += 1;
   }
 
-  return { issued, expectedCharges, succeededCharges, failedCharges, missedCharges, byCurrency };
+  return { issued, expectedCharges, succeededCharges, failedCharges, missedCharges, attemptsSince, byCurrency };
 }
 
 /** Процент с одним знаком; ноль ожидаемых — ноль процентов, а не деление на ноль. */

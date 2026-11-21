@@ -38,6 +38,8 @@ interface MoneyStats {
   readonly missedCharges: number
   readonly potential: ReadonlyArray<{ readonly currency: string; readonly amount: string }>
   readonly received: ReadonlyArray<{ readonly currency: string; readonly amount: string }>
+  /** С какой даты сохраняются неуспешные попытки; `null` — их нет вовсе. */
+  readonly attemptsSince: string | null
 }
 
 interface StatsPayload extends Breakdown {
@@ -317,6 +319,18 @@ export function AutopayStats() {
                     <p className="mt-1 text-xs text-muted-foreground">{t('autopayStats.money.missedHint')}</p>
                   </div>
                 </div>
+
+                {/* Успешные списания — из платежей за всё время, неуспешные и
+                    «не состоялось» — из истории попыток, которая ведётся не с
+                    первого дня. Без этой подписи «потенциал» читался бы как
+                    полный, хотя он — минимум. */}
+                {data.money.attemptsSince ? (
+                  <p className="text-xs leading-snug text-muted-foreground">
+                    {t('autopayStats.money.attemptsSince', {
+                      date: new Date(data.money.attemptsSince).toLocaleDateString(activeLocale()),
+                    })}
+                  </p>
+                ) : null}
               </div>
             )}
           </>

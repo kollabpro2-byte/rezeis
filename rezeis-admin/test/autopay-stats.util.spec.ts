@@ -108,29 +108,39 @@ describe('autopay-stats.util', () => {
   describe('accumulateMoney', () => {
     const range = statsRange('30d', NOW);
 
-    it('суммирует потенциал и полученное по валютам, считая только попытки в периоде', () => {
+    it('успех берёт из платежей, провал — из попыток, по валютам', () => {
       const rows = [
         {
           amount: '299.00',
           currency: 'RUB',
           createdAt: new Date('2026-11-01T10:00:00Z'),
           attempts: [
-            // В периоде: успешная и неуспешная.
+            // Успешная попытка — дубль платежа: её не считаем, иначе успех
+            // задвоится (владелец, 22.11.2026).
             { at: at('2026-11-10T10:00:00Z'), ok: true, amount: '299.00' },
             { at: at('2026-11-15T10:00:00Z'), ok: false, error: 'ACTIVE_FAILED' },
             // Вне периода (старая) — не считаем.
-            { at: at('2026-08-15T10:00:00Z'), ok: true, amount: '299.00' },
+            { at: at('2026-08-15T10:00:00Z'), ok: false, error: 'FAIL' },
           ],
         },
         {
           amount: '19.90',
           currency: 'USD',
           createdAt: new Date('2026-11-05T10:00:00Z'),
-          attempts: [{ at: at('2026-11-12T10:00:00Z'), ok: true, amount: '19.90' }],
+          attempts: [],
         },
       ];
 
-      const totals = accumulateMoney({ rows, range });
+      const totals = accumulateMoney({
+        rows,
+        range,
+        successfulCharges: [
+          { at: new Date('2026-11-10T10:00:00Z'), amount: '299.00', currency: 'RUB' },
+          { at: new Date('2026-11-12T10:00:00Z'), amount: '19.90', currency: 'USD' },
+          // Старый платёж вне периода — в месячный срез не входит.
+          { at: new Date('2026-08-01T10:00:00Z'), amount: '299.00', currency: 'RUB' },
+        ],
+      });
 
       assert.equal(totals.issued, 2);
       assert.equal(totals.expectedCharges, 3);
@@ -140,21 +150,22 @@ describe('autopay-stats.util', () => {
       assert.deepEqual(totals.byCurrency.get('USD'), { potentialCents: 1_990, receivedCents: 1_990 });
     });
 
-    it('для неуспешной попытки планирует сумму строки, для успешной — сумму из попытки', () => {
+    it('провал планирует сумму строки, платёж — свою сумму', () => {
       const rows = [
         {
           amount: '300.00',
           currency: 'RUB',
           createdAt: new Date('2026-11-05T10:00:00Z'),
-          attempts: [
-            // Провайдер списал по старой цене — берём его слово.
-            { at: at('2026-11-10T10:00:00Z'), ok: true, amount: '250.00' },
-            { at: at('2026-11-15T10:00:00Z'), ok: false, error: 'FAIL' },
-          ],
+          attempts: [{ at: at('2026-11-15T10:00:00Z'), ok: false, error: 'FAIL' }],
         },
       ];
 
-      const totals = accumulateMoney({ rows, range });
+      const totals = accumulateMoney({
+        rows,
+        range,
+        // Провайдер списал по старой цене — берём его слово из платежа.
+        successfulCharges: [{ at: new Date('2026-11-10T10:00:00Z'), amount: '250.00', currency: 'RUB' }],
+      });
 
       // 250 (получено) + 300 (планировалось к неуспешной) = 550 потенциала.
       assert.deepEqual(totals.byCurrency.get('RUB'), { potentialCents: 55_000, receivedCents: 25_000 });
@@ -162,21 +173,41 @@ describe('autopay-stats.util', () => {
       assert.equal(totals.failedCharges, 1);
     });
 
-    it('«за всё время» учитывает и старые попытки', () => {
+    it('«за всё время» учитывает и старые платежи', () => {
       const rows = [
         {
           amount: '100.00',
           currency: 'RUB',
           createdAt: new Date('2025-01-01T10:00:00Z'),
-          attempts: [{ at: at('2025-02-01T10:00:00Z'), ok: true, amount: '100.00' }],
+          attempts: [],
         },
       ];
-      const all = accumulateMoney({ rows, range: statsRange('all', NOW) });
+      const charges = [{ at: new Date('2025-02-01T10:00:00Z'), amount: '100.00', currency: 'RUB' }];
+      const all = accumulateMoney({ rows, range: statsRange('all', NOW), successfulCharges: charges });
       assert.equal(all.expectedCharges, 1);
       assert.equal(all.issued, 1);
-      const month = accumulateMoney({ rows, range });
+      const month = accumulateMoney({ rows, range, successfulCharges: charges });
       assert.equal(month.expectedCharges, 0);
       assert.equal(month.issued, 0);
+    });
+
+    it('успешная попытка не задваивает платёж', () => {
+      const rows = [
+        {
+          amount: '299.00',
+          currency: 'RUB',
+          createdAt: new Date('2026-11-01T10:00:00Z'),
+          attempts: [{ at: at('2026-11-10T10:00:00Z'), ok: true, amount: '299.00' }],
+        },
+      ];
+      const totals = accumulateMoney({
+        rows,
+        range,
+        successfulCharges: [{ at: new Date('2026-11-10T10:00:00Z'), amount: '299.00', currency: 'RUB' }],
+      });
+      assert.equal(totals.succeededCharges, 1);
+      assert.equal(totals.expectedCharges, 1);
+      assert.deepEqual(totals.byCurrency.get('RUB'), { potentialCents: 29_900, receivedCents: 29_900 });
     });
 
     it('битые попытки не ломают итог', () => {
@@ -185,12 +216,32 @@ describe('autopay-stats.util', () => {
           amount: '100.00',
           currency: 'RUB',
           createdAt: new Date('2026-11-05T10:00:00Z'),
-          attempts: [{ at: 'not a date', ok: true }, { ok: true }],
+          attempts: [{ at: 'not a date', ok: false }, { ok: false }],
         },
       ];
-      const totals = accumulateMoney({ rows, range });
+      const totals = accumulateMoney({ rows, range, successfulCharges: [] });
       assert.equal(totals.expectedCharges, 0);
+      assert.equal(totals.failedCharges, 0);
       assert.deepEqual(totals.byCurrency.get('RUB'), { potentialCents: 0, receivedCents: 0 });
+    });
+
+    it('называет дату, с которой сохраняются неуспешные попытки', () => {
+      const rows = [
+        {
+          amount: '100.00',
+          currency: 'RUB',
+          createdAt: new Date('2026-10-01T10:00:00Z'),
+          attempts: [
+            { at: at('2026-11-20T10:00:00Z'), ok: false, error: 'FAIL' },
+            { at: at('2026-11-18T10:00:00Z'), ok: false, error: 'FAIL' },
+            // Успешная попытка дату не задаёт: история провалов считается отдельно.
+            { at: at('2026-11-01T10:00:00Z'), ok: true, amount: '100.00' },
+          ],
+        },
+      ];
+      const totals = accumulateMoney({ rows, range, successfulCharges: [] });
+      assert.equal(totals.attemptsSince?.toISOString(), '2026-11-18T10:00:00.000Z');
+      assert.equal(accumulateMoney({ rows: [], range, successfulCharges: [] }).attemptsSince, null);
     });
   });
 
@@ -209,7 +260,7 @@ describe('autopay-stats.util', () => {
     });
 
     it('считает пропуск, если дата прошла и попытки не было', () => {
-      const totals = accumulateMoney({ rows: [missedRow('2026-11-10T10:00:00Z')], range });
+      const totals = accumulateMoney({ rows: [missedRow('2026-11-10T10:00:00Z')], range, successfulCharges: [] });
       assert.equal(totals.missedCharges, 1);
       // В проценты это не входит: ожидаемых попыток нет.
       assert.equal(totals.expectedCharges, 0);
@@ -223,29 +274,31 @@ describe('autopay-stats.util', () => {
           }),
         ],
         range,
+        successfulCharges: [],
       });
       assert.equal(totals.missedCharges, 0);
     });
 
     it('даёт сутки форы свежему списанию: сегодняшнее — ещё не пропуск', () => {
-      const totals = accumulateMoney({ rows: [missedRow('2026-11-21T09:00:00Z')], range });
+      const totals = accumulateMoney({ rows: [missedRow('2026-11-21T09:00:00Z')], range, successfulCharges: [] });
       assert.equal(totals.missedCharges, 0);
     });
 
     it('будущее и отменённые строки не считает', () => {
-      const future = accumulateMoney({ rows: [missedRow('2026-12-10T10:00:00Z')], range });
+      const future = accumulateMoney({ rows: [missedRow('2026-12-10T10:00:00Z')], range, successfulCharges: [] });
       assert.equal(future.missedCharges, 0);
       const cancelled = accumulateMoney({
         rows: [missedRow('2026-11-10T10:00:00Z', { status: 'CANCELLED' })],
         range,
+        successfulCharges: [],
       });
       assert.equal(cancelled.missedCharges, 0);
     });
 
     it('план раньше периода в периодический срез не попадает, а в «всё время» — да', () => {
       const old = missedRow('2026-06-10T10:00:00Z');
-      assert.equal(accumulateMoney({ rows: [old], range }).missedCharges, 0);
-      assert.equal(accumulateMoney({ rows: [old], range: statsRange('all', NOW) }).missedCharges, 1);
+      assert.equal(accumulateMoney({ rows: [old], range, successfulCharges: [] }).missedCharges, 0);
+      assert.equal(accumulateMoney({ rows: [old], range: statsRange('all', NOW), successfulCharges: [] }).missedCharges, 1);
     });
   });
   describe('bucketStart', () => {
