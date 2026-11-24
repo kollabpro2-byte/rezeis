@@ -8,6 +8,7 @@ import {
   HttpException,
   HttpStatus,
   NotFoundException,
+  Optional,
   Param,
   Post,
   StreamableFile,
@@ -23,6 +24,7 @@ import { SettingsService } from '../../settings/services/settings.service';
 import { UploadAttachmentDto } from '../dto/attachment.dto';
 import { CreateGuestTicketDto, GuestReplyDto } from '../dto/guest-support.dto';
 import { GuestGateService } from '../services/guest-gate.service';
+import { SupportAiDispatchService, type SupportAiRouting } from '../services/support-ai-dispatch.service';
 import { SupportGuestService } from '../services/support-guest.service';
 import { AttachGuestDto } from '../dto/guest-support.dto';
 import { GUEST_LOCALE_HEADER, readGuestLocale } from '../utils/guest-letter-language.util';
@@ -61,6 +63,13 @@ export class InternalGuestSupportController {
     private readonly systemEvents: SystemEventsService,
     private readonly settingsService: SettingsService,
     private readonly guestGate: GuestGateService,
+    /**
+     * The AI assistant's dispatch. Last and `@Optional()` so positional
+     * construction in the specs keeps working; without it every guest ticket
+     * is an operator's, as before guests were handed to the assistant.
+     */
+    @Optional()
+    private readonly supportAi?: SupportAiDispatchService,
   ) {}
 
   @Get('config')
@@ -105,7 +114,7 @@ export class InternalGuestSupportController {
     }
 
     const subject = body.subject.trim();
-    const { token, ticketId } = await this.guestService.createConversation({
+    const { token, ticketId, messageId } = await this.guestService.createConversation({
       subject,
       message: body.message.trim(),
       email: body.email?.trim() || null,
@@ -119,13 +128,14 @@ export class InternalGuestSupportController {
       flaggedReason: verdict.flaggedReason,
       locale: readGuestLocale(locale),
     });
-    this.systemEvents.info(
+    const routing = await this.routeGuestMessage(ticketId, messageId ?? null, 'open');
+    this.announce(
       EVENT_TYPES.SUPPORT_TICKET_CREATED,
-      'SUPPORT',
       `Гостевой тикет: ${subject}`,
       // The mark travels into the event too, so a flooded queue is visible in
       // the operator's own stream rather than only when somebody opens tickets.
       { ticketId, subject, guest: true, flagged: verdict.flaggedReason !== null },
+      routing,
     );
     const ticket = await this.guestService.getConversation(token);
     return {
@@ -162,18 +172,20 @@ export class InternalGuestSupportController {
   ): Promise<SerializedGuestTicket> {
     const ticket = await this.guestService.reply(token ?? '', body.content.trim(), readGuestLocale(locale));
     if (ticket === null) throw new NotFoundException('Conversation not found');
-    this.systemEvents.info(
+    const entity = ticket as GuestTicketEntity;
+    const routing = await this.routeGuestMessage(entity.id, readClientMessageId(ticket), 'message');
+    this.announce(
       EVENT_TYPES.SUPPORT_TICKET_USER_REPLY,
-      'SUPPORT',
       'Ответ гостя в обращении',
       // WHICH conversation. Without the id the card said a guest had replied
       // somewhere, and the admin push had nothing to deep-link to — it keys
       // `/support-tickets?ticket=` off this exact field.
       {
         guest: true,
-        ticketId: (ticket as GuestTicketEntity).id,
-        subject: (ticket as GuestTicketEntity).subject,
+        ticketId: entity.id,
+        subject: entity.subject,
       },
+      routing,
     );
     return serializeGuestTicket(ticket);
   }
@@ -226,12 +238,17 @@ export class InternalGuestSupportController {
       throw mapAttachmentError(err);
     }
     if (ticket === null) throw new NotFoundException('Conversation not found');
-    this.systemEvents.info(
+    const entity = ticket as GuestTicketEntity;
+    // The assistant cannot see a file; it reads the name and usually hands
+    // the thread over. That is its call, not this route's — the same as a
+    // signed-in customer's attachment.
+    const routing = await this.routeGuestMessage(entity.id, readClientMessageId(ticket), 'message');
+    this.announce(
       EVENT_TYPES.SUPPORT_TICKET_USER_REPLY,
-      'SUPPORT',
       'Гость прикрепил файл в обращении',
       // Same fields as the signed-in counterpart in `InternalUserSupportController`.
-      { guest: true, ticketId: (ticket as GuestTicketEntity).id },
+      { guest: true, ticketId: entity.id },
+      routing,
     );
     return serializeGuestTicket(ticket);
   }
@@ -249,6 +266,56 @@ export class InternalGuestSupportController {
       type: file.mimeType,
       length: file.sizeBytes,
       disposition: `inline; filename="${encodeURIComponent(file.filename)}"`,
+    });
+  }
+
+  /**
+   * Hand one visitor message to the assistant when it can answer.
+   *
+   * `open` is a new conversation (`takeNewTicket`); `message` is a later line
+   * or a file (`onClientMessage`). No message id — a stub that did not return
+   * one — stays with the operators rather than queueing an answer to nothing.
+   * Absent dispatch is the same: every guest ticket is an operator's.
+   */
+  private async routeGuestMessage(
+    ticketId: string,
+    messageId: string | null,
+    kind: 'open' | 'message',
+  ): Promise<SupportAiRouting> {
+    if (this.supportAi === undefined || messageId === null || messageId.length === 0) return 'operator';
+    return kind === 'open'
+      ? this.supportAi.takeNewTicket(ticketId, messageId)
+      : this.supportAi.onClientMessage(ticketId, messageId);
+  }
+
+  /**
+   * Log the visitor's message and, on the ordinary path, alert the operators.
+   *
+   * On a thread the AI assistant leads, the event is still written — it is the
+   * audit log's trace and what refreshes an open «Тикеты» page — but without
+   * the Telegram card (`skipTelegram`) and marked `aiHandling`, which keeps it
+   * out of the push and the bell. The operators hear about such a thread when
+   * the assistant hands it over. One path or the other, never both: an
+   * assistant-led guest ticket must not also raise the ordinary «new ticket» /
+   * «guest replied» card.
+   */
+  private announce(
+    type: string,
+    message: string,
+    metadata: Record<string, unknown>,
+    routing: SupportAiRouting,
+  ): void {
+    if (routing === 'operator') {
+      this.systemEvents.info(type, 'SUPPORT', message, metadata);
+      return;
+    }
+    this.systemEvents.emit({
+      type,
+      category: 'SUPPORT',
+      severity: 'INFO',
+      message,
+      metadata: { ...metadata, aiHandling: true },
+      skipTelegram: true,
     });
   }
 }
@@ -309,6 +376,26 @@ interface GuestCreateResponse {
   readonly token: string;
   readonly resumeCode: string;
   readonly ticket: SerializedGuestTicket | null;
+}
+
+/**
+ * The visitor message just stored on this thread.
+ *
+ * `clientMessageId` is stamped by `SupportGuestService` from the insert.
+ * The fallback — the last USER line — covers a ticket read that was not
+ * stamped. An ADMIN/SYSTEM last line is not a visitor message and is not
+ * dispatched: that is what stops an assistant reply, which is stored as
+ * ADMIN, from being queued again if it were ever re-read through here.
+ */
+function readClientMessageId(ticket: unknown): string | null {
+  if (typeof ticket !== 'object' || ticket === null) return null;
+  const stamped = (ticket as { readonly clientMessageId?: unknown }).clientMessageId;
+  if (typeof stamped === 'string' && stamped.length > 0) return stamped;
+  const messages = (ticket as GuestTicketEntity).messages;
+  if (!Array.isArray(messages) || messages.length === 0) return null;
+  const last = messages[messages.length - 1];
+  if (last === undefined || last.authorType !== 'USER') return null;
+  return typeof last.id === 'string' && last.id.length > 0 ? last.id : null;
 }
 
 function serializeGuestTicket(ticket: unknown): SerializedGuestTicket {

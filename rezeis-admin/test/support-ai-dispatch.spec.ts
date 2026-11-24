@@ -101,6 +101,21 @@ describe('a new cabinet ticket', () => {
     assert.equal(jobs.length, 0);
   });
 
+  it('takes a guest ticket the same way when the assistant is on', async () => {
+    const { service, ticket, jobs } = build({ ticket: { userId: null } });
+    assert.equal(await service.takeNewTicket('t-1', 'm-1'), 'assistant');
+    assert.equal(ticket.aiActive, true);
+    assert.deepEqual(jobs[0].data, { ticketId: 't-1', messageId: 'm-1' });
+  });
+
+  it('leaves a guest ticket with the operators while the assistant is off or has no key', async () => {
+    const { service, ticket, jobs, events } = build({ ready: false, ticket: { userId: null } });
+    assert.equal(await service.takeNewTicket('t-1', 'm-1'), 'operator');
+    assert.equal(ticket.aiActive, false);
+    assert.equal(jobs.length, 0);
+    assert.equal(events.length, 0);
+  });
+
   it('falls back to the operators when the answer cannot be queued — nobody waits on silence', async () => {
     const { service, ticket } = build({ queueFails: true });
     assert.equal(await service.takeNewTicket('t-1', 'm-1'), 'operator');
@@ -113,6 +128,20 @@ describe('a client message on a ticket', () => {
     const { service, jobs } = build({ ticket: { aiActive: false } });
     assert.equal(await service.onClientMessage('t-1', 'm-2'), 'operator');
     assert.equal(jobs.length, 0);
+  });
+
+  it('queues the assistant\'s answer on a guest thread it leads', async () => {
+    const { service, jobs, events } = build({ ticket: { aiActive: true, userId: null } });
+    assert.equal(await service.onClientMessage('t-1', 'm-2'), 'assistant');
+    assert.equal(jobs.length, 1);
+    assert.equal(events.length, 0, 'no alert while the assistant answers');
+  });
+
+  it('leaves a guest reply with the operators when the assistant is off and does not lead', async () => {
+    const { service, jobs, events } = build({ ready: false, ticket: { aiActive: false, userId: null } });
+    assert.equal(await service.onClientMessage('t-1', 'm-2'), 'operator');
+    assert.equal(jobs.length, 0);
+    assert.equal(events.length, 0, 'nobody was waiting on an assistant that was never on this thread');
   });
 
   it('queues the assistant\'s answer when it leads the thread', async () => {

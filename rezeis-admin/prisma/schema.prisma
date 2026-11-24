@@ -4081,8 +4081,8 @@ model SupportTicket {
   closedBy   String?              @map("closed_by")
   createdAt  DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt  DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
-  /// The AI assistant answers this thread. Set when a cabinet ticket is
-  /// opened while the assistant is on and configured; cleared by an
+  /// The AI assistant answers this thread. Set when a cabinet or guest ticket
+  /// is opened while the assistant is on and configured; cleared by an
   /// operator's own message, by the operator's switch, and by a hand-over.
   aiActive        Boolean   @default(false) @map("ai_active")
   /// When the assistant last took the thread: opened with it, or given back

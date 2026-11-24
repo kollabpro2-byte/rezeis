@@ -84,7 +84,7 @@ export class SupportGuestService {
     readonly flaggedReason?: string | null;
     /** The guest page's language, kept for the letters (`guest-letter-language.util.ts`). */
     readonly locale?: GuestLetterLanguage | null;
-  }): Promise<{ readonly token: string; readonly ticketId: string }> {
+  }): Promise<{ readonly token: string; readonly ticketId: string; readonly messageId: string | null }> {
     const token = generateToken();
     const limits = await this.settingsService.getSupportLimits();
     const expiresAt = new Date(Date.now() + limits.guestTokenTtlHours * 3_600_000);
@@ -104,14 +104,14 @@ export class SupportGuestService {
       guestId: guest.id,
       subject: input.subject,
     });
-    await this.supportTicketsService.addMessage({
+    const message = await this.supportTicketsService.addMessage({
       ticketId: ticket.id,
       authorType: 'USER',
       authorId: null,
       content: input.message,
       metadata: guestLocaleMetadata(input.locale),
     });
-    return { token, ticketId: ticket.id };
+    return { token, ticketId: ticket.id, messageId: messageIdOf(message) };
   }
 
   /** Full conversation thread for the bound token, or `null` (uniform). */
@@ -157,14 +157,15 @@ export class SupportGuestService {
   ): Promise<unknown | null> {
     const resolution = await this.resolve(token);
     if (resolution === null) return null;
-    await this.supportTicketsService.addMessage({
+    const message = await this.supportTicketsService.addMessage({
       ticketId: resolution.ticketId,
       authorType: 'USER',
       authorId: null,
       content,
       metadata: guestLocaleMetadata(locale),
     });
-    return this.supportTicketsService.getById(resolution.ticketId);
+    const ticket = await this.supportTicketsService.getById(resolution.ticketId);
+    return stampClientMessage(ticket, messageIdOf(message));
   }
 
   /** Visitor closes (archives) their own conversation. */
@@ -327,7 +328,7 @@ export class SupportGuestService {
   ): Promise<unknown | null> {
     const resolution = await this.resolve(token);
     if (resolution === null) return null;
-    await this.supportAttachmentService.storeForMessage({
+    const stored = await this.supportAttachmentService.storeForMessage({
       ticketId: resolution.ticketId,
       authorType: 'USER',
       authorId: null,
@@ -336,7 +337,8 @@ export class SupportGuestService {
       declaredMime: input.mimeType,
       dataBase64: input.dataBase64,
     });
-    return this.supportTicketsService.getById(resolution.ticketId);
+    const ticket = await this.supportTicketsService.getById(resolution.ticketId);
+    return stampClientMessage(ticket, stored.messageId);
   }
 
   /**
@@ -484,4 +486,25 @@ function safeUserWhere(userRef: string): Prisma.UserWhereUniqueInput | null {
 
 function generateToken(): string {
   return randomBytes(TOKEN_BYTES).toString('base64url');
+}
+
+/**
+ * The id of a message just written, or `null` when the writer returned nothing
+ * an id can be read from. Specs that stub `addMessage` with `{}` / `undefined`
+ * stay valid; production Prisma rows always carry `id`.
+ */
+function messageIdOf(message: { readonly id?: unknown } | null | undefined): string | null {
+  return typeof message?.id === 'string' && message.id.length > 0 ? message.id : null;
+}
+
+/**
+ * Remember which visitor message was just stored, so the guest controller can
+ * hand THAT message to the assistant. Not a column and not part of the guest
+ * API: `serializeGuestTicket` copies a fixed field list and drops this one.
+ * Using the id from the insert, rather than "whatever is last" after a second
+ * read, keeps a concurrent operator reply from stealing the dispatch.
+ */
+function stampClientMessage(ticket: unknown, messageId: string | null): unknown {
+  if (messageId === null || typeof ticket !== 'object' || ticket === null) return ticket;
+  return Object.assign(ticket, { clientMessageId: messageId });
 }

@@ -37,6 +37,8 @@ function build(opts: {
   readonly duringModel?: (state: { aiActive: boolean; messages: Message[] }) => void;
   /** The client card service; absent — the assistant is built without one. */
   readonly clientCards?: { read(userId: string): Promise<unknown> };
+  /** A guest thread: no account. The reply is a letter, not a cabinet card. */
+  readonly guest?: boolean;
 } = {}) {
   const state = {
     aiActive: opts.aiActive ?? true,
@@ -44,6 +46,8 @@ function build(opts: {
   };
   const written: Array<{ authorType: string; authorId: string | null; content: string; metadata: unknown }> = [];
   const notified: string[] = [];
+  const guestNotified: string[] = [];
+  const dispatchCalls: string[] = [];
   const handOffs: string[] = [];
   /** How many messages were written when the ticket was put back in the queue. */
   const reopened: number[] = [];
@@ -57,7 +61,8 @@ function build(opts: {
         status: 'OPEN',
         aiActive: state.aiActive,
         aiActiveSince: opts.since ?? null,
-        user: { id: 'u-1', language: 'EN' },
+        channel: opts.guest === true ? 'GUEST' : 'CABINET',
+        user: opts.guest === true ? null : { id: 'u-1', language: 'EN' },
         messages: [...state.messages].reverse(),
       }),
     },
@@ -93,6 +98,14 @@ function build(opts: {
     },
     reopenForOperator: async () => {
       reopened.push(written.length);
+    },
+    onClientMessage: async () => {
+      dispatchCalls.push('onClientMessage');
+      return 'assistant';
+    },
+    takeNewTicket: async () => {
+      dispatchCalls.push('takeNewTicket');
+      return 'assistant';
     },
   };
   const completions = [...(opts.completions ?? [{ content: 'Переустановите профиль.' }])];
@@ -147,16 +160,19 @@ function build(opts: {
     { getCatalogPlans: async () => [] } as never,
     { getPublicFaq: async () => [] } as never,
     tickets as never,
-    { notifyAdminReply: async (input: { ticketId: string }) => void notified.push(input.ticketId) } as never,
+    {
+      notifyAdminReply: async (input: { ticketId: string }) => void notified.push(input.ticketId),
+      notifyGuestReply: async (ticketId: string) => void guestNotified.push(ticketId),
+    } as never,
     dispatch as never,
     opts.clientCards as never,
   );
-  return { service, state, written, notified, handOffs, reopened, modelCalls };
+  return { service, state, written, notified, guestNotified, dispatchCalls, handOffs, reopened, modelCalls };
 }
 
 describe('the assistant answers in the ticket', () => {
   it('as an ordinary support reply, marked for the panel, and tells the client', async () => {
-    const { service, written, notified, handOffs } = build();
+    const { service, written, notified, guestNotified, dispatchCalls, handOffs } = build();
     assert.equal(await service.answer({ ticketId: 't-1', messageId: 'm-1' }), 'answered');
     assert.equal(written.length, 1);
     assert.equal(written[0].authorType, 'ADMIN');
@@ -164,7 +180,20 @@ describe('the assistant answers in the ticket', () => {
     assert.deepEqual(written[0].metadata, { ai: true, model: 'test-model' });
     assert.equal(written[0].content, 'Переустановите профиль.');
     assert.deepEqual(notified, ['t-1'], 'told the way an operator\'s reply is');
+    assert.deepEqual(guestNotified, [], 'a cabinet ticket is not also emailed as a guest');
+    assert.deepEqual(dispatchCalls, [], 'the reply is not queued again');
     assert.deepEqual(handOffs, []);
+  });
+
+  it('emails a guest the way an operator\'s reply does, and does not open a cabinet card', async () => {
+    const { service, written, notified, guestNotified, dispatchCalls } = build({ guest: true });
+    assert.equal(await service.answer({ ticketId: 't-1', messageId: 'm-1' }), 'answered');
+    assert.equal(written.length, 1);
+    assert.equal(written[0].authorType, 'ADMIN');
+    assert.deepEqual(written[0].metadata, { ai: true, model: 'test-model' });
+    assert.deepEqual(guestNotified, ['t-1'], 'one letter, the staff-reply channel');
+    assert.deepEqual(notified, [], 'no account, so no cabinet card');
+    assert.deepEqual(dispatchCalls, [], 'an assistant reply must not re-enter dispatch');
   });
 
   it('stands down when the job\'s message is no longer the last word', async () => {
@@ -255,6 +284,30 @@ describe('the assistant hands the thread over', () => {
     assert.deepEqual(handOffs, ['ai_off']);
   });
 
+  it('when it was switched off under a guest thread, the visitor still gets the one line by email', async () => {
+    const { service, guestNotified, notified, handOffs, dispatchCalls } = build({ guest: true, enabled: false });
+    assert.equal(await service.answer({ ticketId: 't-1', messageId: 'm-1' }), 'handed_off');
+    assert.deepEqual(handOffs, ['ai_off']);
+    assert.deepEqual(guestNotified, ['t-1'], 'the hand-over line uses the guest letter, once');
+    assert.deepEqual(notified, []);
+    assert.deepEqual(dispatchCalls, []);
+  });
+
+  it('tells a guest once when it hands the thread over itself', async () => {
+    const { service, guestNotified, notified, dispatchCalls, handOffs } = build({
+      guest: true,
+      completions: [
+        { content: null, toolCalls: [{ name: 'transfer_to_operator', args: { reason: 'нужен человек' } }] },
+        { content: 'Передаю специалисту.' },
+      ],
+    });
+    assert.equal(await service.answer({ ticketId: 't-1', messageId: 'm-1' }), 'handed_off');
+    assert.deepEqual(handOffs, ['нужен человек']);
+    assert.deepEqual(guestNotified, ['t-1']);
+    assert.deepEqual(notified, []);
+    assert.deepEqual(dispatchCalls, []);
+  });
+
   it('when every attempt failed, with a line to the client — once', async () => {
     const { service, written, handOffs, reopened } = build();
     await service.giveUp({ ticketId: 't-1', messageId: 'm-1' });
@@ -313,5 +366,98 @@ describe('the assistant knows whom it answers', () => {
     assert.equal(await service.answer({ ticketId: 't-1', messageId: 'm-1' }), 'answered');
     const system = String((modelCalls[0] as { messages: Array<{ content: unknown }> }).messages[0]?.content);
     assert.match(system, /ДАННЫЕ КЛИЕНТА: недоступны/);
+  });
+});
+
+/**
+ * The webhook bridge (baseUrl contains "webhook", or model is `grok-bot`).
+ * Cabinet bodies stay as they were; a guest ticket adds `guest: true`.
+ */
+describe('the webhook bridge', () => {
+  function settings(over: Partial<AiConfigSettings> = {}): AiConfigSettings {
+    return {
+      enabled: true,
+      apiKey: 'sk-bridge',
+      baseUrl: 'https://bot.example/webhook/support',
+      model: 'grok-bot',
+      modelsEndpoint: '',
+      systemPrompt: '',
+      ...over,
+    };
+  }
+
+  async function posted(guest: boolean, over: Partial<AiConfigSettings> = {}) {
+    const bodies: unknown[] = [];
+    const headers: Array<Record<string, string>> = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      headers.push({ ...(init?.headers as Record<string, string> | undefined) });
+      bodies.push(JSON.parse(String(init?.body)));
+      return new Response(
+        JSON.stringify({
+          id: 'c',
+          object: 'chat.completion',
+          created: 0,
+          model: 'grok-bot',
+          choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as typeof fetch;
+    try {
+      class Exposed extends SupportAiResponderService {
+        public client(guestFlag: boolean) {
+          return this.createClient(settings(over), 't-guest', guestFlag);
+        }
+      }
+      const service = new Exposed(
+        {} as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        {} as never,
+      );
+      const messages = [{ role: 'user' as const, content: 'help' }];
+      const tools = [
+        { type: 'function' as const, function: { name: 'transfer_to_operator', description: 'x', parameters: { type: 'object', properties: {} } } },
+      ];
+      await service.client(guest).chat.completions.create({
+        model: settings(over).model,
+        messages,
+        tools,
+        temperature: 0.4,
+        max_tokens: 800,
+      });
+      return { body: bodies[0] as Record<string, unknown>, header: headers[0] ?? {}, messages, tools };
+    } finally {
+      globalThis.fetch = original;
+    }
+  }
+
+  it('marks a guest ticket and keeps every field the bridge already reads', async () => {
+    const { body, header, messages, tools } = await posted(true);
+    assert.equal(body['model'], 'grok-bot');
+    assert.deepEqual(body['messages'], messages);
+    assert.deepEqual(body['tools'], tools);
+    assert.equal(body['temperature'], 0.4);
+    assert.equal(body['max_tokens'], 800);
+    assert.equal(body['ticketId'], 't-guest');
+    assert.equal(body['guest'], true);
+    assert.equal(header['Authorization'], 'Bearer sk-bridge');
+    assert.equal(header['Content-Type'], 'application/json');
+  });
+
+  it('leaves a cabinet ticket body without a guest field', async () => {
+    const { body } = await posted(false, { model: 'gpt-4o-mini' });
+    assert.equal('guest' in body, false);
+    assert.equal(body['model'], 'gpt-4o-mini');
+    assert.equal(body['ticketId'], 't-guest');
+    assert.equal(body['temperature'], 0.4);
+    assert.equal(body['max_tokens'], 800);
+    assert.ok(Array.isArray(body['messages']));
+    assert.ok(Array.isArray(body['tools']));
   });
 });

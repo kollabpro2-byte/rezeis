@@ -63,6 +63,11 @@ interface TicketForAnswer {
   /** When the assistant took the thread this time; its reply limit counts from here. */
   readonly aiActiveSince: Date | null;
   readonly user: { readonly id: string; readonly language: string | null } | null;
+  /**
+   * No account on the thread. The webhook bridge is told with an optional
+   * `guest: true`; the reply goes out as the guest letter, not a cabinet card.
+   */
+  readonly guest: boolean;
   /** Oldest first, at most {@link HISTORY_MESSAGES}. */
   readonly messages: ReadonlyArray<TicketTurn & { readonly id: string }>;
 }
@@ -164,7 +169,7 @@ export class SupportAiResponderService {
       },
       ...buildSupportAiConversation(ticket.subject, ticket.messages),
     ];
-    const result = await this.runModel(this.createClient(settings, ticket.id), model, messages);
+    const result = await this.runModel(this.createClient(settings, ticket.id, ticket.guest), model, messages);
 
     // The model took seconds. An operator may have answered, switched the
     // assistant off, or the client written again in that time.
@@ -202,7 +207,7 @@ export class SupportAiResponderService {
    * per job because the operator can change the key or the address at any
    * moment and the next answer must use the new ones.
    */
-  protected createClient(settings: AiConfigSettings, ticketId?: string): SupportAiModelClient {
+  protected createClient(settings: AiConfigSettings, ticketId?: string, guest = false): SupportAiModelClient {
     const base = settings.baseUrl.trim();
     // Webhook mode: if baseUrl contains "webhook" or model is "grok-bot"
     if (base.includes('webhook') || settings.model === 'grok-bot') {
@@ -216,6 +221,9 @@ export class SupportAiResponderService {
                   'Content-Type': 'application/json',
                   ...(settings.apiKey ? { Authorization: `Bearer ${settings.apiKey}` } : {}),
                 },
+                // Existing fields stay put — the bridge already reads them.
+                // `guest` is added only for a visitor with no account, so a
+                // cabinet ticket's body is unchanged.
                 body: JSON.stringify({
                   model: params.model,
                   messages: params.messages,
@@ -223,6 +231,7 @@ export class SupportAiResponderService {
                   temperature: params.temperature,
                   max_tokens: params.max_tokens,
                   ticketId: ticketId || null,
+                  ...(guest ? { guest: true } : {}),
                 }),
                 signal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
               });
@@ -305,7 +314,12 @@ export class SupportAiResponderService {
 
   /**
    * Store the assistant's reply as a support reply and tell the client the way
-   * an operator's reply is told — the cabinet feed, the bot, web push.
+   * an operator's reply is told — the cabinet feed, the bot, web push. A guest
+   * (no account) gets the same letter an operator's reply sends.
+   *
+   * One channel, not both. The stored line is ADMIN with `{ "ai": true }`, so
+   * it does not take the thread away and it is not a visitor message: nothing
+   * here calls dispatch again, and the letter is not a second reply.
    */
   private async writeReply(ticket: TicketForAnswer, content: string, model: string | null): Promise<void> {
     await this.tickets.addMessage({
@@ -321,6 +335,10 @@ export class SupportAiResponderService {
         subject: ticket.subject,
         user: { id: ticket.user.id, language: ticket.user.language },
       });
+      return;
+    }
+    if (ticket.guest) {
+      void this.notifications.notifyGuestReply(ticket.id);
     }
   }
 
@@ -342,6 +360,7 @@ export class SupportAiResponderService {
         status: true,
         aiActive: true,
         aiActiveSince: true,
+        channel: true,
         user: { select: { id: true, language: true } },
         messages: {
           orderBy: { createdAt: 'desc' },
@@ -364,6 +383,7 @@ export class SupportAiResponderService {
       aiActive: row.aiActive,
       aiActiveSince: row.aiActiveSince,
       user: row.user === null ? null : { id: row.user.id, language: row.user.language ?? null },
+      guest: row.user === null || row.channel === 'GUEST',
       messages: [...row.messages].reverse(),
     };
   }
