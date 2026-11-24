@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 
 import { InternalGuestSupportController } from '../src/modules/support-tickets/controllers/internal-guest-support.controller';
 import { CreateGuestTicketDto, GuestReplyDto } from '../src/modules/support-tickets/dto/guest-support.dto';
+import type { SupportAiRouting } from '../src/modules/support-tickets/services/support-ai-dispatch.service';
 
 /**
  * reiwa-facing guest controller (Phase 2). Verifies that authorization is
@@ -23,18 +24,25 @@ const TICKET_ENTITY = {
   ],
 };
 
-function build() {
+function build(opts: {
+  readonly takeNewTicket?: SupportAiRouting;
+  readonly onClientMessage?: SupportAiRouting;
+  /** When false, the controller is built without dispatch, as the older specs are. */
+  readonly assistant?: boolean;
+} = {}) {
   const calls = {
     createConversation: [] as unknown[],
     getConversation: [] as string[],
     reply: [] as Array<{ token: string; content: string }>,
     close: [] as string[],
     events: [] as Array<{ type: string; metadata: Record<string, unknown> }>,
+    emits: [] as Array<{ skipTelegram?: boolean; metadata?: Record<string, unknown> }>,
+    ai: [] as Array<{ method: string; ticketId: string; messageId: string }>,
   };
   const guestService = {
     createConversation: async (input: unknown) => {
       calls.createConversation.push(input);
-      return { token: 'tok-abc', ticketId: 't-1' };
+      return { token: 'tok-abc', ticketId: 't-1', messageId: 'm-open' };
     },
     getConversation: async (token: string) => {
       calls.getConversation.push(token);
@@ -49,7 +57,7 @@ function build() {
     },
     reply: async (token: string, content: string) => {
       calls.reply.push({ token, content });
-      return token === 'tok-abc' ? TICKET_ENTITY : null;
+      return token === 'tok-abc' ? { ...TICKET_ENTITY, clientMessageId: 'm-guest' } : null;
     },
     close: async (token: string) => {
       calls.close.push(token);
@@ -60,7 +68,23 @@ function build() {
     info: (type: string, _category: string, _message: string, metadata: Record<string, unknown>) => {
       calls.events.push({ type, metadata });
     },
+    emit: (event: { skipTelegram?: boolean; metadata?: Record<string, unknown> }) => {
+      calls.emits.push(event);
+    },
   };
+  const supportAi =
+    opts.assistant === true || opts.takeNewTicket !== undefined || opts.onClientMessage !== undefined
+      ? {
+          takeNewTicket: async (ticketId: string, messageId: string) => {
+            calls.ai.push({ method: 'takeNewTicket', ticketId, messageId });
+            return opts.takeNewTicket ?? 'operator';
+          },
+          onClientMessage: async (ticketId: string, messageId: string) => {
+            calls.ai.push({ method: 'onClientMessage', ticketId, messageId });
+            return opts.onClientMessage ?? 'operator';
+          },
+        }
+      : undefined;
   const settings = {
     getSupportRuntimeConfig: async () => ({ enabled: true, turnstileSiteKey: '', turnstileSecret: null }),
   };
@@ -72,6 +96,7 @@ function build() {
     // recognises, which is what these cases are about; the gate's own
     // behaviour is pinned in `guest-support-gate.spec.ts`.
     { evaluate: async () => ({ kind: 'allow', flaggedReason: null }) } as never,
+    supportAi as never,
   );
   return { controller, calls };
 }
@@ -150,5 +175,67 @@ describe('InternalGuestSupportController', () => {
     const { controller } = build();
     assert.deepEqual(await controller.close('tok-abc'), { ok: true });
     await assert.rejects(() => controller.close('wrong'), isNotFound);
+  });
+
+  it('sends a new guest ticket to the assistant and does not also alert the operators', async () => {
+    const { controller, calls } = build({ takeNewTicket: 'assistant' });
+    const body: CreateGuestTicketDto = { subject: ' Payment failed ', message: ' help ' };
+    await controller.create(body, '203.0.113.9');
+    assert.deepEqual(calls.ai, [{ method: 'takeNewTicket', ticketId: 't-1', messageId: 'm-open' }]);
+    assert.equal(calls.events.length, 0, 'no ordinary new-ticket card');
+    assert.equal(calls.emits.length, 1);
+    assert.equal(calls.emits[0].skipTelegram, true);
+    assert.equal(calls.emits[0].metadata?.aiHandling, true);
+    assert.equal(calls.emits[0].metadata?.guest, true);
+    assert.equal(calls.emits[0].metadata?.ticketId, 't-1');
+  });
+
+  it('keeps a new guest ticket with the operators when the assistant is off', async () => {
+    const { controller, calls } = build({ takeNewTicket: 'operator' });
+    const body: CreateGuestTicketDto = { subject: 's', message: 'm' };
+    await controller.create(body, undefined);
+    assert.deepEqual(calls.ai, [{ method: 'takeNewTicket', ticketId: 't-1', messageId: 'm-open' }]);
+    assert.equal(calls.events.length, 1);
+    assert.equal(calls.events[0].metadata.guest, true);
+    assert.equal(calls.events[0].metadata.aiHandling, undefined);
+    assert.equal(calls.emits.length, 0, 'the operator card is the one info() emit, not a second one');
+  });
+
+  it('sends a guest reply to the assistant without a second operator card', async () => {
+    const { controller, calls } = build({ onClientMessage: 'assistant' });
+    await controller.reply('tok-abc', { content: ' still broken ' });
+    assert.deepEqual(calls.ai, [{ method: 'onClientMessage', ticketId: 't-1', messageId: 'm-guest' }]);
+    assert.equal(calls.events.length, 0);
+    assert.equal(calls.emits.length, 1);
+    assert.equal(calls.emits[0].skipTelegram, true);
+    assert.equal(calls.emits[0].metadata?.guest, true);
+    assert.equal(calls.emits[0].metadata?.ticketId, 't-1');
+    assert.equal(calls.emits[0].metadata?.aiHandling, true);
+  });
+
+  it('alerts the operators once for a guest reply the assistant does not take', async () => {
+    const { controller, calls } = build({ onClientMessage: 'operator' });
+    await controller.reply('tok-abc', { content: 'hello' });
+    assert.equal(calls.ai[0]?.method, 'onClientMessage');
+    assert.equal(calls.events.length, 1);
+    assert.equal(calls.events[0].type, 'support.ticket_user_reply');
+    assert.equal(calls.events[0].metadata.guest, true);
+    assert.equal(calls.emits.length, 0);
+  });
+
+  it('sends a guest file to the assistant the same way a signed-in attachment does', async () => {
+    const { controller, calls } = build({ onClientMessage: 'assistant' });
+    (controller as unknown as { guestService: { addAttachment: unknown } }).guestService.addAttachment = async () => ({
+      ...TICKET_ENTITY,
+      clientMessageId: 'm-file',
+    });
+    await controller.upload('tok-abc', {
+      filename: 'screen.png',
+      mimeType: 'image/png',
+      dataBase64: 'iVBORw0KGgo=',
+    } as never);
+    assert.deepEqual(calls.ai, [{ method: 'onClientMessage', ticketId: 't-1', messageId: 'm-file' }]);
+    assert.equal(calls.events.length, 0);
+    assert.equal(calls.emits.length, 1);
   });
 });

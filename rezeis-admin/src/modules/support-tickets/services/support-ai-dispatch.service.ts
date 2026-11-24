@@ -55,9 +55,21 @@ export type SupportAiRouting = 'assistant' | 'operator';
  *
  * ── Who gets the assistant ───────────────────────────────────────────────
  *
- * Cabinet tickets of signed-in clients. A guest conversation (no account)
- * stays with the operators: every reply there is a letter to the visitor, and
- * an anonymous thread is the cheapest way to spend the operator's key.
+ * Cabinet tickets of signed-in clients, and guest conversations opened on
+ * the public support page. The same switch decides both: «Ассистент включён»
+ * and a stored API key. While it is off, a guest thread stays with the
+ * operators, as it did before guests were included.
+ *
+ * A guest has no cabinet and no bot. The assistant's reply is still an
+ * ordinary support message, and the guest is told by the same letter an
+ * operator's reply sends (`notifyGuestReply`). The assistant's own message
+ * does not come back through dispatch — it is ADMIN with the assistant's
+ * mark, and only a visitor's message is queued.
+ *
+ * The operator's switch that turns the assistant ON still refuses a guest
+ * thread (`setActive`): the panel does not offer «Вернуть ИИ» there. An
+ * operator takes a guest thread by replying, which clears `aiActive` the
+ * same way it does on a cabinet ticket.
  */
 @Injectable()
 export class SupportAiDispatchService {
