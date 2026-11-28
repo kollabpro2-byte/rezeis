@@ -1010,10 +1010,20 @@ export class WebAuthService {
     if (webAccount === null || webAccount.passwordHash === null) {
       throw new NotFoundException('Web account not found');
     }
-    const ok = await this.passwordHashService.verifyPassword({
+    let ok = await this.passwordHashService.verifyPassword({
       plainTextPassword: input.currentPassword,
       passwordHash: webAccount.passwordHash,
     });
+    // Строка, записанная двойным хешем (`scrypt(sha256(пароль))`), не откроется
+    // открытым паролем: проверяем присланный sha256 — только если открытый не
+    // подошёл, как при входе. Новый пароль ниже всё равно пишется как scrypt(пароль).
+    const legacyCurrent = input.legacyCurrentPassword?.trim();
+    if (!ok && legacyCurrent) {
+      ok = await this.passwordHashService.verifyPassword({
+        plainTextPassword: legacyCurrent,
+        passwordHash: webAccount.passwordHash,
+      });
+    }
     if (!ok) {
       throw new UnauthorizedException('Invalid current password');
     }
